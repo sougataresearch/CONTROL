@@ -3,6 +3,16 @@
 Automated control of 4× Thorlabs K10CR2 rotation mounts (PSG/PSA polarizers + QWPs)
 and 1× IDS U3-3890CP-M-GL camera for 3×3 and 4×4 Mueller matrix imaging.
 
+**This is an earlier, notebook-driven reference implementation, kept for
+comparison — it is not required to run any current experiment.** The
+production acquisition code is `../discreate_angle/` (3×3 and 4×4 discrete)
+and `../continous_rotation/` (4×4 continuous, acquisition loop still
+unimplemented); Mueller matrix reconstruction from captured images lives in
+`matrix/own_code/` at the repository root. For the physics behind PSG/PSA,
+Stokes vectors, and Mueller matrices — assuming no prior background — see
+`../discreate_angle/README.md`'s "Physics background, from zero" section;
+everything here operates on the same underlying concepts.
+
 ## Folder layout
 ```
 MMIE_Control/

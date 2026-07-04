@@ -11,6 +11,69 @@ This folder covers **3×3** and **4×4 discrete** (stepped-QWP) acquisition only
 4×4 continuous rotation is a separate, independent implementation in
 `../continous_rotation/` — the two folders share no code or run data.
 
+Capturing images is only half the job — turning them into a Mueller matrix
+happens afterward, offline, in `matrix/own_code/3x3/` (or `4x4/`) at the
+root of this repository. See "After you've captured images" below for the
+one manual step that connects the two.
+
+## Physics background, from zero
+
+This section explains *why* the software asks you to rotate two (or four)
+motors to a grid of angles and snap a picture at each one — read it if
+you're operating this rig without necessarily having a polarimetry
+background. The reconstruction side (`matrix/own_code/`) has the fuller
+mathematical version of the same ideas — this is the operator-facing
+summary of the same physics.
+
+**Polarization** is the shape a light wave's oscillation traces as it
+travels: a straight line at some angle (linear), a circle (circular,
+spinning one way or the other), or something in between (elliptical).
+Ordinary light is unpolarized — a fast random mix of every angle, averaging
+to no preference at all. A **polarizer** only lets one linear angle through;
+a **quarter-wave plate (QWP)** delays one axis of oscillation relative to
+the perpendicular one, which is what turns linear polarization into
+circular (and back).
+
+A polarization state is written as four numbers, `(S0,S1,S2,S3)`, called a
+**Stokes vector**: `S0` is plain brightness, `S1`/`S2` describe linear
+polarization along two different reference angles, and `S3` describes
+circular polarization. What a sample *does* to polarization — its complete
+optical fingerprint — is a 4×4 (or, linear-only, 3×3) matrix, the
+**Mueller matrix** `M`, such that `Stokes_out = M @ Stokes_in`.
+
+The camera can only ever read plain brightness (`S0`) of the light hitting
+it — it has no way to directly see `S1`, `S2`, or `S3`. So to pin down every
+unknown entry of `M`, this rig:
+
+1. **Generates** a series of *known* input polarization states before the
+   sample, by rotating `PSG_Polarizer` (and, in 4×4 mode, `PSG_QWP`) to
+   different angles.
+2. **Analyzes** the light coming out, by rotating `PSA_Analyzer` (and,
+   in 4×4 mode, `PSA_QWP`) to different angles after the sample.
+3. Records one brightness value per (generator angle, analyzer angle)
+   combination — that's one image, one filename, one equation relating the
+   unknown entries of `M` to that one number.
+4. Once enough combinations have been captured (at minimum 9 for 3×3, 16
+   for 4×4 — more is better for precision, see the reconstruction README),
+   there are enough equations to solve for every entry of `M`. That solving
+   step is exactly what `matrix/own_code/` does with the images this folder
+   produces.
+
+**Why 3×3 only uses two motors (both polarizers), and 4×4 uses all four:**
+a plain rotating polarizer can only ever generate or detect *linear*
+polarization — no rotation angle of it produces or sees any `S3`
+(circular) component, so a two-polarizer rig can only recover the
+`S0,S1,S2` sub-block of `M` (a 3×3 matrix). Reaching every polarization
+state — linear, circular, and elliptical — requires a QWP: fed light at
+45° to its axis, the quarter-wavelength delay it introduces converts
+straight-line oscillation into circular. That's why 4×4 mode holds the
+polarizers at a **fixed** angle and instead rotates the **QWPs** — the
+fixed polarizer sets one specific linear input, and rotating the QWP
+relative to it sweeps through every other reachable state, which is what's
+needed to solve for the full 16-entry Mueller matrix, including the
+circular-polarization-coupled entries (`m03`, `m30`, `m33`, ...) that 3×3
+mode cannot see at all.
+
 ## Testing
 
 ```powershell
@@ -407,6 +470,27 @@ Important files:
 The transcript is flushed continuously so it remains useful after most crashes.
 It includes environment results, confirmations, device identities, requested
 and applied camera settings, image statistics, warnings, and retry messages.
+
+## After you've captured images: getting a Mueller matrix out of them
+
+This folder only captures and saves images — it does not compute a Mueller
+matrix. That happens afterward, offline, in `matrix/own_code/3x3/` or
+`matrix/own_code/4x4/` at the repository root (pick the one matching the
+mode you ran).
+
+The one manual step in between: copy that run's `Images/` folder and
+`Config/experiment_config.json` (the reconstruction code needs nothing
+else — `Logs/`, `Checkpoints/`, `Reports/` are for your own records) into a
+sample-labeled folder following the one naming rule in `matrix/NAMING.md`,
+e.g. `G:\control\Data\<date>\<sample-type>\<sample name>\`. This run
+folder's own name (`Data/YYYY-MM-DD_<sample name>`, see "Output folders"
+above) already carries the sample name — you're reorganizing it by
+date/type, not renaming it from scratch. If you deliberately captured the
+same sample multiple times to average out error, see
+`matrix/own_code/<mode>/average_rounds.py` and `matrix/NAMING.md`'s
+`_round<NN>` suffix, rather than reusing this folder's own auto `_02`/`_03`
+disambiguation suffix (that suffix just avoids overwriting a same-named
+folder — it isn't the multi-round convention the analysis side expects).
 
 ## Resuming an interrupted experiment
 

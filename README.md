@@ -15,7 +15,23 @@ control/
 │   ├── MMIE_Control/          ← earlier notebook-based reference implementation
 │   └── check_config_sync.py   ← standalone: diffs motor calibration between the two folders
 └── matrix/                    ← offline Mueller matrix reconstruction from saved images
+    ├── NAMING.md               ← the one folder-naming rule, used by every capture
+    ├── own_code/
+    │   ├── 3x3/                ← reconstructs a 3x3 Mueller matrix from N images (any sample)
+    │   └── 4x4/                ← reconstructs a full 4x4 Mueller matrix from N images (any sample)
+    ├── tinghuye/                ← earlier from-scratch reconstruction scripts, kept for reference
+    └── Mueller_calculation_36_images_method.py  ← reference-paper's canonical 36-image method
 ```
+
+**The whole project, end to end:** capture images with an acquisition
+folder under `Measuremt_ script/` → copy that run's `Images/` and
+`Config/experiment_config.json` into a sample-labeled folder following
+`matrix/NAMING.md` → run the matching pipeline in `matrix/own_code/3x3/` or
+`matrix/own_code/4x4/` to get a reconstructed Mueller matrix. Each of those
+three destinations has its own README with a "physics background, from
+zero" section — together they explain, from no prior assumed knowledge,
+what a Stokes vector and a Mueller matrix are, why the rig rotates the
+motors it does, and exactly how the images turn into a matrix.
 
 The two acquisition folders under `Measuremt_ script/` are **deliberately
 independent** — neither imports from the other, and neither shares a `Data/`
@@ -67,16 +83,55 @@ folder above.
 
 ### `matrix/`
 
-`Mueller_calculation_36_images_method.py` — offline reconstruction of a
-sample's 4×4 Mueller matrix from a set of 36 saved intensity images (the
-canonical H/V/P/M/R/L polarization-state combinations), plus polar
-decomposition into diattenuation, polarizance, and depolarization maps.
-Standalone from the acquisition code above; point it at a folder of
-previously captured images.
+Everything here is offline: it reads previously captured images and never
+touches the motors or camera. Nothing in `matrix/` is imported by, or
+modifies, anything under `Measuremt_ script/`.
 
-Based on: S. Obando-Vasquez, A. Doblas, and C. Trujillo, *"Apparatus and
-method to estimate the Mueller matrix in bright-field microscopy,"* Applied
-Optics (2021).
+- **`NAMING.md`** — the one folder-naming rule every capture should follow
+  before either pipeline below can use it (what to call a single run vs. a
+  repeat round, and why). Read this first if you're not sure where a run's
+  images should live.
+
+- **`own_code/3x3/`** — reconstructs a sample's 3×3 Mueller matrix
+  (linear-polarization sub-block only) from however many PSG/PSA-angle
+  images a run actually has, using the real rotation physics of a rotated
+  polarizer rather than a fixed-image-count shortcut. Works on any sample —
+  air, a polarizer, a QWP, tissue — since the sample's identity never
+  enters the code. `main.py` is the one file you run for a single capture;
+  `average_rounds.py` aggregates several repeat rounds of the same sample
+  into a mean and standard deviation. See its `README.md` for a full
+  physics primer (assuming no prior polarimetry background) and a
+  function-by-function walkthrough.
+
+- **`own_code/4x4/`** — the full 4×4 counterpart: same architecture, same
+  usage pattern (`main.py` / `average_rounds.py`), but models the rig's
+  fixed-polarizer + rotating-QWP generator/analyzer instead, so it can also
+  recover the circular-polarization-coupled entries a 3×3 measurement
+  cannot see. No 4×4 dataset has been captured yet as of this writing —
+  `RUN_DIRECTORY` in its `main.py` is a placeholder.
+
+  `own_code/3x3/` and `own_code/4x4/` are deliberately independent — no
+  shared files, each with its own complete copy of the rotation physics,
+  its own image loader (which refuses to run on the other mode's data with
+  a clear error), and its own README.
+
+- **`tinghuye/`** — earlier from-scratch reconstruction scripts (3×3 and
+  4×4, built from a fixed small angle set, plus a theory-vs-experiment
+  comparison plot). Kept for reference; superseded in capability by
+  `own_code/` (arbitrary image count, real rig integration, calibration
+  hooks) but useful as a simpler standalone read of the same math.
+
+- **`Mueller_calculation_36_images_method.py`** — the reference paper's
+  original method: reconstructs a 4×4 Mueller matrix from exactly 36 images
+  captured at the canonical H/V/P/M/R/L polarization-state combinations
+  (a different acquisition pattern from what this rig's `discreate_angle`
+  currently produces — see `own_code/4x4/README.md`'s discussion of why),
+  plus polar decomposition into diattenuation, polarizance, and
+  depolarization maps.
+
+  Based on: S. Obando-Vasquez, A. Doblas, and C. Trujillo, *"Apparatus and
+  method to estimate the Mueller matrix in bright-field microscopy,"*
+  Applied Optics (2021).
 
 ### `Measuremt_ script/check_config_sync.py`
 
@@ -101,3 +156,12 @@ after any hardware change.
    hardware-independent logic — run `python -m unittest test_pure_functions
    -v` from inside it. A few ROI-selection tests need NumPy and are skipped
    without it (dry-run never exercises that code either).
+6. Once you have captured images, copy that run's `Images/` folder and
+   `Config/experiment_config.json` into a sample-labeled folder following
+   `matrix/NAMING.md`, then run `matrix/own_code/3x3/main.py` or
+   `matrix/own_code/4x4/main.py` (matching the mode you captured) to get a
+   reconstructed Mueller matrix. New to the physics behind any of this?
+   Start with the "Physics background, from zero" section in
+   `Measuremt_ script/discreate_angle/README.md` or
+   `matrix/own_code/3x3/README.md` — either builds the same ideas up from
+   no prior assumed knowledge.

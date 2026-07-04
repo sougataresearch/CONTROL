@@ -15,6 +15,39 @@ become mode-keyed dicts (mirroring `discreate_angle/config.py`'s
 `ACTIVE_MOTORS`), and `capture_camera_references()`/parking would need a
 3×3 branch — see the project history for the fuller discussion.
 
+## Physics background, from zero
+
+See `../discreate_angle/README.md`'s physics section for the fundamentals
+(Stokes vectors, Mueller matrices, why a QWP is needed at all) — this
+section only covers what's specific to *continuous* rotation.
+
+`discreate_angle/` gets its many (generator angle, analyzer angle, image)
+data points by *stopping* the QWPs at a grid of discrete angles and
+capturing one image per stop. The **dual-rotating-retarder** technique
+implemented here instead spins both QWPs continuously, at a fixed angular
+*ratio* to each other (classically 1:5 — the analyzer QWP turns 5° for
+every 1° the generator QWP turns), while the camera keeps capturing frames.
+Because the two QWPs are never at a fixed relative angle for long, every
+captured frame corresponds to a different, unrepeated combination of
+generator/analyzer states, and — over one full revolution of the slower
+QWP — the frames sweep through a dense, well-conditioned set of
+polarization states without ever having to stop and settle the motors
+between shots. The intensity recorded at each moment, as a function of the
+rotating QWP's instantaneous angle, is a periodic waveform whose Fourier
+coefficients directly correspond to the unknown entries of the sample's
+Mueller matrix (the classical Fourier-analysis solution to this problem,
+rather than the discrete per-image linear system used in
+`matrix/own_code/`) — the 1:5 ratio specifically is what guarantees no two
+harmonics in that waveform collide and become impossible to separate.
+
+This is why continuous rotation isn't just "discrete mode but faster": the
+underlying math needed to turn captured frames into a Mueller matrix
+(Fourier analysis of a continuous waveform) is genuinely different from the
+per-image linear-system solve in `matrix/own_code/`, which is why the two
+acquisition schemes are independent and why no reconstruction code for
+continuous data exists yet — see "Current status" below for what's actually
+implemented today.
+
 ## Testing
 
 ```powershell
