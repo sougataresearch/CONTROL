@@ -26,6 +26,11 @@ MOTOR_SN: dict[str, str] = {
     "PSG_QWP": "",
     "PSA_QWP": "",
     "PSA_Analyzer": "55542504",
+    # Not part of ACTIVE_MOTORS — a separate motorized mount for a KNOWN
+    # reference optic (e.g. a linear polarizer/QWP at a known angle) used
+    # only by calibration.verify_with_reference_sample() to validate the
+    # system, never touched during a normal experiment.
+    "SAMPLE": "",
 }
 
 # EXPERIMENT SETTING — MUST EDIT PER LAB SETUP.
@@ -40,6 +45,7 @@ ZERO_OFFSET: dict[str, float] = {
     "PSG_QWP": 0.0,
     "PSA_QWP": 0.0,
     "PSA_Analyzer": 61.55,
+    "SAMPLE": 0.0,
 }
 
 # EXPERIMENT SETTING — verify on each lab computer.
@@ -93,6 +99,14 @@ class CameraSettings:
     mean_too_dark: float = 1.0
     # Mean intensity above this prints a "may be saturated" warning.
     mean_too_bright: float = 250.0
+    # EXPERIMENT SETTING. camera_controller.select_roi()'s sliding-window size
+    # (pixels) used to find a flat, sufficiently bright region on the bright
+    # reference frame, for the bright/dark reference ratio only.
+    roi_window_size: int = 200
+    # Step (pixels) between candidate ROI windows. Smaller = finer search, slower.
+    roi_stride: int = 100
+    # Minimum acceptable mean intensity for a candidate ROI window.
+    roi_min_mean: float = 50.0
     # model/serial_number: filled in automatically by CameraController.discover()/
     # initialize() — do not set manually.
     model: str = ""

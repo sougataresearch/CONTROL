@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sys
 from datetime import date
@@ -76,25 +77,73 @@ def parse_angle_spec(text: str) -> list[float]:
     return values
 
 
-def create_run_directory(root: Path = DATA_ROOT) -> Path:
-    """Create the next collision-free YYYY-MM-DD_RunXX directory tree.
+_RUN_SUBFOLDERS = ("Images", "Logs", "Config", "DarkFrames", "Reports", "Checkpoints", "Results")
 
-    Called once from 01_main.main() for a fresh (non --resume) run, before
-    the first operator prompt, so even mode selection gets captured in the
-    transcript. Scans existing folders for today's date prefix, picks the
-    lowest unused RunXX number, and creates the seven standard subfolders
-    (Images, Logs, Config, DarkFrames, Reports, Checkpoints, Results).
+
+def sanitize_folder_name(name: str) -> str:
+    """Make ``name`` safe as a single Windows/POSIX path component.
+
+    Replaces characters Windows forbids in file/folder names, strips
+    trailing dots/spaces (also disallowed by Windows), and falls back to
+    "sample" if nothing usable remains (e.g. an all-symbol input).
+    """
+
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip().rstrip(". ")
+    return cleaned or "sample"
+
+
+def _next_available(path: Path) -> Path:
+    """Return ``path`` if it doesn't exist yet, else the first
+    "<path>_02", "<path>_03", ... that doesn't."""
+
+    if not path.exists():
+        return path
+    counter = 2
+    while True:
+        candidate = path.with_name(f"{path.name}_{counter:02d}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def create_run_directory(root: Path, name: str) -> Path:
+    """Create a fresh, collision-free "YYYY-MM-DD_<name>" directory tree.
+
+    ``name`` is normally the sample name (see 01_main.run_fresh_session()),
+    sanitized via sanitize_folder_name(); if a folder by that name already
+    exists (e.g. the same sample measured twice), a "_02", "_03", ... suffix
+    is appended. Creates the seven standard subfolders (Images, Logs,
+    Config, DarkFrames, Reports, Checkpoints, Results).
     """
 
     root.mkdir(parents=True, exist_ok=True)
     prefix = date.today().isoformat()
-    existing = [p for p in root.glob(f"{prefix}_Run*") if p.is_dir()]
-    used = {int(p.name.rsplit("Run", 1)[1]) for p in existing if p.name.rsplit("Run", 1)[1].isdigit()}
-    run_number = next(number for number in range(1, 10_000) if number not in used)
-    run = root / f"{prefix}_Run{run_number:02d}"
-    for child in ("Images", "Logs", "Config", "DarkFrames", "Reports", "Checkpoints", "Results"):
+    run = _next_available(root / f"{prefix}_{sanitize_folder_name(name)}")
+    for child in _RUN_SUBFOLDERS:
         (run / child).mkdir(parents=True, exist_ok=False)
     return run
+
+
+def rename_run_directory(run: Path, name: str) -> Path:
+    """Rename an existing run directory in place to "YYYY-MM-DD_<name>".
+
+    Used once, for the very first sample of a fresh session: main() creates
+    a "pending" placeholder (via create_run_directory()) before mode
+    selection so the transcript can capture it, then this renames that
+    folder to the first sample's real name once it's known. The caller
+    MUST stop the transcript (closing its log file) before calling this —
+    Windows/NTFS refuses to rename a directory while a file inside it is
+    still open, even by the same process — and start a new one immediately
+    after; see 01_main.run_fresh_session(). Subsequent samples in the same
+    session get a genuinely new folder via create_run_directory() instead,
+    since their data must not overwrite the previous sample's.
+    """
+
+    prefix = date.today().isoformat()
+    target = _next_available(run.parent / f"{prefix}_{sanitize_folder_name(name)}")
+    if target != run:
+        run.rename(target)
+    return target
 
 
 def write_json(path: Path, payload: object) -> None:

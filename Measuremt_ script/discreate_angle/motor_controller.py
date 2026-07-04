@@ -137,6 +137,7 @@ class MotorController:
             print(f"[{name}] Connecting...")
             if self.dry_run:
                 self.devices[name] = object()
+                print(f"[{name}] Connected (dry-run).")
                 self._inter_motor_pause(index)
                 continue
             if not serial:
@@ -146,6 +147,7 @@ class MotorController:
             self.devices[name] = device
             print(f"[{name}] Connected ({serial}).")
             self._inter_motor_pause(index)
+        print(f"All motors connected: {', '.join(self.names)}.")
 
     def initialize_all(self) -> None:
         """Load each motor's Kinesis device-settings profile (config.MOTOR_SETTINGS_NAME
@@ -154,17 +156,17 @@ class MotorController:
 
         for index, (name, device) in enumerate(self.devices.items()):
             print(f"[{name}] Initializing settings...")
-            if self.dry_run:
-                self._inter_motor_pause(index)
-                continue
-            if not device.IsSettingsInitialized():
-                device.WaitForSettingsInitialized(10_000)
-            configuration = device.LoadMotorConfiguration(MOTOR_SN[name])
-            configuration.DeviceSettingsName = MOTOR_SETTINGS_NAME
-            configuration.UpdateCurrentConfiguration()
-            device.StartPolling(250)
-            time.sleep(0.5)
+            if not self.dry_run:
+                if not device.IsSettingsInitialized():
+                    device.WaitForSettingsInitialized(10_000)
+                configuration = device.LoadMotorConfiguration(MOTOR_SN[name])
+                configuration.DeviceSettingsName = MOTOR_SETTINGS_NAME
+                configuration.UpdateCurrentConfiguration()
+                device.StartPolling(250)
+                time.sleep(0.5)
+            print(f"[{name}] Initialized.")
             self._inter_motor_pause(index)
+        print("All motors initialized.")
 
     def enable_all(self) -> None:
         """Energize each motor's motion controller. Called from
@@ -175,7 +177,9 @@ class MotorController:
             if not self.dry_run:
                 device.EnableDevice()
                 time.sleep(self.timing.enable_settle_s)
+            print(f"[{name}] Enabled.")
             self._inter_motor_pause(index)
+        print("All motors enabled.")
 
     def home_all(self) -> None:
         """Run each motor's homing routine (establishes the absolute zero
@@ -191,6 +195,7 @@ class MotorController:
             time.sleep(self.timing.homing_settle_s)
             print(f"[{name}] Homed and settled.")
             self._inter_motor_pause(index)
+        print("All motors homed.")
 
     def move_to_optical_zero_all(self) -> None:
         """Move every active motor to its config.ZERO_OFFSET motor angle,
@@ -201,6 +206,7 @@ class MotorController:
             self.move_motor_angle(name, ZERO_OFFSET[name])
             print(f"[{name}] At optical zero (motor {ZERO_OFFSET[name]:.4f}°).")
             self._inter_motor_pause(index)
+        print("All motors at optical zero.")
 
     def move_motor_angle(self, name: str, angle: float) -> int:
         """Move and verify one axis, retrying failures with a fixed backoff.
@@ -292,14 +298,17 @@ class MotorController:
         directory handle. Called from the ``finally`` block in
         01_main.run_session() so it always runs, even after an error."""
 
-        for device in self.devices.values():
+        names = tuple(self.devices)
+        for name, device in self.devices.items():
             if not self.dry_run:
                 try:
                     device.StopPolling()
                     device.Disconnect()
                 except Exception as exc:
                     print(f"Motor shutdown warning: {exc}")
+            print(f"[{name}] Disconnected.")
         self.devices.clear()
         if self._dll_directory is not None:
             self._dll_directory.close()
             self._dll_directory = None
+        print(f"All motors disconnected: {', '.join(names) or '(none were connected)'}.")

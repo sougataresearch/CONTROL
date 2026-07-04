@@ -1,32 +1,50 @@
 """Interactive entry point for 4x4 CONTINUOUS rotation.
 
 Deliberate duplicate of discreate_angle/01_main.py's orchestration shape
-(hardware bring-up, guided camera setup, transcript, error handling) but for
-continuous rotation only — there is no 3x3/4x4/discrete mode choice here,
-this folder only ever runs one experiment shape. The one thing this file
-CANNOT do yet is actually spin the QWPs and capture frames: that is
-continuous_engine.ContinuousEngine.run_continuous(), which raises
+(hardware bring-up once, then a multi-sample loop, transcript-per-sample,
+error handling) but for continuous rotation only — there is no 3x3/4x4
+mode choice here, this folder only ever runs one experiment shape. The one
+thing this file CANNOT do yet is actually spin the QWPs and capture frames:
+that is continuous_engine.ContinuousEngine.run_continuous(), which raises
 NotImplementedError until the frame-rate-vs-angle trigger decision is made
 (see that module's docstring). Everything up to that point — environment
 checks, hardware bring-up, camera verification, plan/config persistence —
-is real and runs today, including in dry-run mode.
+is real and runs today, including in dry-run mode. There is no --resume:
+continuous rotation is a single uninterrupted revolution, not a resumable
+state list (see checkpoint_manager.py).
 """
 
 from __future__ import annotations
 
-import argparse
+import shutil
 import signal
 import threading
 import traceback
 from pathlib import Path
 
-from camera_controller import CameraController
-from config import ACTIVE_MOTORS, DATA_ROOT, ZERO_OFFSET, ExperimentConfig, ExperimentMetadata
+from camera_controller import CameraController, roi_mean, select_roi
+from config import (
+    ACTIVE_MOTORS,
+    DATA_ROOT,
+    ZERO_OFFSET,
+    CameraSettings,
+    ExperimentConfig,
+    ExperimentMetadata,
+    TimingSettings,
+)
 from continuous_engine import ContinuousEngine, EmergencyStopRequested
 from logger_manager import SessionTranscript
 from motor_controller import MotorController
 from rotation_plan import continuous_plan
-from utils import check_environment, create_run_directory, parse_ratio, write_json, yes_no
+from utils import (
+    check_environment,
+    create_run_directory,
+    optical_to_motor,
+    parse_ratio,
+    rename_run_directory,
+    write_json,
+    yes_no,
+)
 
 
 def ask_float(prompt: str) -> float:
@@ -60,21 +78,28 @@ def print_environment_report() -> bool:
 
 def confirm_stage(text: str) -> None:
     """Ask a yes/no confirmation before a safety-sensitive step; "no"
-    cancels the whole session (KeyboardInterrupt, caught in run_session())."""
+    cancels the whole session (KeyboardInterrupt, caught in run_fresh_session())."""
 
     if not yes_no(text):
         raise KeyboardInterrupt("Operator cancelled initialization.")
 
 
-def configure_experiment(dry_run: bool, run: Path) -> ExperimentConfig:
-    """Ask operator/sample/comments, the two fixed polarizer angles, and the
-    QWP rotation ratio. Always 4x4 continuous — no mode choice."""
+def ask_metadata() -> ExperimentMetadata:
+    """Ask operator/sample/comments. The sample name doubles as this
+    round's run-folder name (see utils.create_run_directory()/
+    rename_run_directory())."""
 
-    metadata = ExperimentMetadata(
+    return ExperimentMetadata(
         operator=input("Operator Name: ").strip(),
         sample=input("Sample Name: ").strip(),
         comments=input("Comments: ").strip(),
     )
+
+
+def ask_fixed_and_ratio() -> tuple[dict[str, float], tuple[int, int]]:
+    """Ask the two fixed polarizer angles and the QWP rotation ratio for
+    one sample. Always 4x4 continuous — no mode choice."""
+
     fixed = {
         "PSG_Polarizer": ask_float("Fixed PSG Polarizer optical angle: ") % 360,
         "PSA_Analyzer": ask_float("Fixed PSA Analyzer optical angle: ") % 360,
@@ -85,25 +110,15 @@ def configure_experiment(dry_run: bool, run: Path) -> ExperimentConfig:
             break
         except (ValueError, IndexError) as exc:
             print(f"Invalid ratio: {exc}")
-    config = ExperimentConfig(
-        metadata=metadata,
-        run_directory=run,
-        dry_run=dry_run,
-        fixed_angles=fixed,
-        rotation_ratio=ratio,
-    )
-    write_json(run / "Config" / "rotation_plan.json", continuous_plan(ratio, fixed))
     print(f"Fixed angles: {fixed}")
     print(f"Rotation ratio (PSG_QWP:PSA_QWP): {ratio}")
-    return config
+    return fixed, ratio
 
 
 def initialize_motors(motors: MotorController) -> None:
     """discover -> connect_all -> initialize_all -> enable_all -> home_all ->
-    move_to_optical_zero_all, each behind a confirm_stage. Identical shape to
-    discreate_angle's initialize_motors(); after this, all four motors sit
-    at optical zero — park_fixed_polarizers() then moves the two polarizers
-    to the operator's chosen fixed angle."""
+    move_to_optical_zero_all, each behind a confirm_stage. Called once per
+    session (not per sample — see run_fresh_session())."""
 
     motors.discover()
     confirm_stage("Continue with the listed devices?")
@@ -118,23 +133,23 @@ def initialize_motors(motors: MotorController) -> None:
     motors.move_to_optical_zero_all()
 
 
-def park_fixed_polarizers(motors: MotorController, config: ExperimentConfig) -> None:
-    """Move PSG_Polarizer/PSA_Analyzer to their fixed optical angle. They
-    never move again for the rest of the run — only the two QWPs rotate."""
-
-    from utils import optical_to_motor
+def park_fixed_polarizers(motors: MotorController, fixed_angles: dict[str, float]) -> None:
+    """Move PSG_Polarizer/PSA_Analyzer to this sample's fixed optical angle.
+    They never move again for the rest of this sample's run — only the two
+    QWPs rotate. Called per sample (fixed angles can differ sample to
+    sample), unlike initialize_motors()."""
 
     confirm_stage(
-        f"Park PSG_Polarizer at optical {config.fixed_angles['PSG_Polarizer']:.3f}° and "
-        f"PSA_Analyzer at optical {config.fixed_angles['PSA_Analyzer']:.3f}°?"
+        f"Park PSG_Polarizer at optical {fixed_angles['PSG_Polarizer']:.3f}° and "
+        f"PSA_Analyzer at optical {fixed_angles['PSA_Analyzer']:.3f}°?"
     )
     motors.move_motor_angle(
-        "PSG_Polarizer", optical_to_motor(config.fixed_angles["PSG_Polarizer"], ZERO_OFFSET["PSG_Polarizer"])
+        "PSG_Polarizer", optical_to_motor(fixed_angles["PSG_Polarizer"], ZERO_OFFSET["PSG_Polarizer"])
     )
     motors.move_motor_angle(
-        "PSA_Analyzer", optical_to_motor(config.fixed_angles["PSA_Analyzer"], ZERO_OFFSET["PSA_Analyzer"])
+        "PSA_Analyzer", optical_to_motor(fixed_angles["PSA_Analyzer"], ZERO_OFFSET["PSA_Analyzer"])
     )
-    print("Polarizers parked at their fixed optical angle for the whole run.")
+    print("Polarizers parked at their fixed optical angle for this sample.")
 
 
 def detect_camera(camera: CameraController) -> None:
@@ -145,15 +160,17 @@ def detect_camera(camera: CameraController) -> None:
     confirm_stage("Camera detection succeeded. Continue with hardware initialization?")
 
 
-def guided_camera_setup(config: ExperimentConfig, camera: CameraController) -> None:
-    """Cockpit checks while Python has released the camera. Simpler than
-    discreate_angle's version: the analyzer is fixed for the whole run, so
-    there is only one bright state to confirm (at the operator's chosen
-    fixed angle) rather than a bright/dark pair — a genuine dark reference
-    would require moving the analyzer off its fixed angle, which this mode
-    deliberately never does mid-run."""
+def guided_camera_setup(
+    dry_run: bool,
+    camera_settings: CameraSettings,
+) -> None:
+    """Cockpit checks while Python has released the camera. Called once per
+    session (not per sample). Only one manual Cockpit check here since
+    exposure/frame rate selection is the only thing that needs a human
+    look — the automatic bright/dark reference pair happens afterward, per
+    sample, in capture_camera_references()."""
 
-    if config.dry_run:
+    if dry_run:
         print(
             "Dry-run mode: IDS Peak Cockpit checks are simulated and saved camera "
             "defaults are retained."
@@ -177,26 +194,98 @@ def guided_camera_setup(config: ExperimentConfig, camera: CameraController) -> N
 
     exposure_ms = ask_positive_float(
         "Exposure time selected in IDS Peak Cockpit (ms)",
-        config.camera.exposure_us / 1000.0,
+        camera_settings.exposure_us / 1000.0,
     )
     frame_rate_fps = ask_positive_float(
         "Frame rate selected in IDS Peak Cockpit (fps)",
-        config.camera.frame_rate_fps,
+        camera_settings.frame_rate_fps,
     )
-    config.camera.exposure_us = exposure_ms * 1000.0
-    config.camera.frame_rate_fps = frame_rate_fps
+    camera_settings.exposure_us = exposure_ms * 1000.0
+    camera_settings.frame_rate_fps = frame_rate_fps
     print(f"Requested experiment exposure: {exposure_ms:.3f} ms")
     print(f"Requested experiment frame rate: {frame_rate_fps:.3f} fps")
 
 
-def capture_camera_reference(config: ExperimentConfig, camera: CameraController) -> None:
-    """Capture one reference image at the fixed polarizer angles (no
-    bright/dark pair — see guided_camera_setup())."""
+def capture_camera_references(
+    run_directory: Path,
+    dry_run: bool,
+    fixed_angles: dict[str, float],
+    motors: MotorController,
+    camera: CameraController,
+    camera_settings: CameraSettings,
+) -> None:
+    """Capture quantitative bright/dark references without modifying pixels.
 
-    reference_dir = config.run_directory / "Reports"
-    print("Capturing reference frame at the fixed polarizer angles...")
-    stats = camera.test_frame(reference_dir / "Reference_fixed_angles.bmp")
-    print(f"Reference frame mean intensity: {stats['mean']:.3f}")
+    Called for EVERY sample, not just once — the operator may have bumped
+    the setup while swapping samples by hand. Moves PSA_Analyzer briefly
+    off its fixed angle (+90°) for the dark shot, then back — this happens
+    before continuous rotation starts, so it does not conflict with "the
+    analyzer never moves during acquisition." Bright/dark ratio is computed
+    over an automatically-selected ROI (see camera_controller.select_roi()),
+    same approach and reasoning as discreate_angle/01_main.py's
+    capture_camera_references().
+    """
+
+    reference_dir = run_directory / "Results"
+    fixed_psg = fixed_angles["PSG_Polarizer"]
+    fixed_psa = fixed_angles["PSA_Analyzer"]
+
+    if dry_run:
+        print(f"Capturing bright reference at fixed PSG={fixed_psg}°, PSA={fixed_psa}°...")
+        camera.test_frame(reference_dir / "BrightReference_fixed.bmp")
+        motors.move_motor_angle("PSA_Analyzer", optical_to_motor((fixed_psa + 90) % 360, ZERO_OFFSET["PSA_Analyzer"]))
+        print("Capturing dark reference at fixed PSG, PSA+90°...")
+        camera.test_frame(reference_dir / "DarkReference_fixed_plus90.bmp")
+        motors.move_motor_angle("PSA_Analyzer", optical_to_motor(fixed_psa, ZERO_OFFSET["PSA_Analyzer"]))
+        print(
+            "Dry-run mode: reference files and statistics were verified, but "
+            "physical polarization contrast cannot be evaluated (no ROI selected)."
+        )
+        return
+
+    confirm_stage(
+        "Illumination is ON? (required before the automatic bright/dark reference capture)"
+    )
+
+    print(f"Capturing bright reference at fixed PSG={fixed_psg}°, PSA={fixed_psa}°...")
+    bright = camera.test_frame(reference_dir / "BrightReference_fixed.bmp")
+    roi = select_roi(
+        camera.last_image_array,
+        camera_settings.roi_window_size,
+        camera_settings.roi_stride,
+        camera_settings.roi_min_mean,
+    )
+    write_json(
+        run_directory / "Config" / "roi.json",
+        {"x": roi[0], "y": roi[1], "width": roi[2], "height": roi[3]},
+    )
+    bright_mean = roi_mean(camera.last_image_array, roi)
+
+    motors.move_motor_angle("PSA_Analyzer", optical_to_motor((fixed_psa + 90) % 360, ZERO_OFFSET["PSA_Analyzer"]))
+    print("Capturing dark reference at fixed PSG, PSA+90°...")
+    dark = camera.test_frame(reference_dir / "DarkReference_fixed_plus90.bmp")
+    dark_mean = roi_mean(camera.last_image_array, roi)
+    motors.move_motor_angle("PSA_Analyzer", optical_to_motor(fixed_psa, ZERO_OFFSET["PSA_Analyzer"]))
+
+    contrast = float("inf") if dark_mean == 0 else bright_mean / dark_mean
+    print(
+        f"Polarization reference result (ROI {roi[2]}x{roi[3]} at {roi[0]},{roi[1]}) — "
+        f"bright mean: {bright_mean:.3f}, dark mean: {dark_mean:.3f}, "
+        f"bright/dark ratio: {contrast:.3f}"
+    )
+
+    problems = []
+    if bright_mean <= dark_mean:
+        problems.append("bright-reference ROI mean is not greater than dark-reference ROI mean")
+    if int(bright["saturated_pixels"]) > 0:
+        problems.append(
+            f"bright reference contains {bright['saturated_pixels']} pixels at 255 (whole frame)"
+        )
+    if problems:
+        print("CAMERA VERIFICATION WARNING: " + "; ".join(problems))
+        confirm_stage("Continue despite the camera verification warning?")
+    else:
+        print("Camera bright/dark and saturation verification passed.")
 
 
 def write_error_traceback(run: Path) -> None:
@@ -207,108 +296,174 @@ def write_error_traceback(run: Path) -> None:
     print(details)
 
 
-def run_session(run: Path) -> int:
-    """Top-to-bottom continuous-rotation session. Returns a process exit
-    code (0 success/expected-stop, 1 error, 2 blocked by a pre-check,
-    130 stopped/cancelled). Structurally mirrors discreate_angle's
-    run_session(), minus mode selection, disk-space estimate (continuous has
-    no fixed image count ahead of time), and --resume (continuous rotation
-    is not resumable — see checkpoint_manager.py)."""
+def run_fresh_session(initial_run: Path) -> int:
+    """Multi-sample session: hardware bring-up once, then loop over as many
+    samples as the operator wants, each getting its own
+    Data/YYYY-MM-DD_<sample name> folder.
 
-    environment_ok = print_environment_report()
-    dry_run = yes_no("Use dry-run mode?", default=not environment_ok)
-    if not dry_run and not environment_ok:
-        print("Required production dependencies are missing; non-dry operation is unsafe.")
-        return 2
+    Deliberate duplicate of discreate_angle/01_main.py's run_fresh_session()
+    shape, minus mode selection (always 4x4 continuous) and the disk-space
+    check (continuous has no fixed image count decided ahead of time).
+    Owns its own transcript lifecycle for the same reason: each new sample
+    gets a fresh run folder, and therefore a fresh
+    Logs/terminal_transcript.txt. The transcript is stopped before every
+    rename/create and a new one started right after — Windows/NTFS refuses
+    to rename a directory while a file inside it (the log itself) is still
+    open, even by the same process. The very first sample renames
+    ``initial_run`` (a "pending" placeholder main() created before hardware
+    bring-up) in place; every later sample gets a genuinely new folder.
 
-    config = configure_experiment(dry_run, run)
-    write_json(run / "Config" / "experiment_config.json", config.to_dict())
+    A NotImplementedError from the (currently unbuilt) acquisition engine
+    ends the WHOLE session immediately, same as before the multi-sample
+    loop existed — it is a structural "this isn't built yet" condition that
+    would recur identically for every sample, not a per-sample hardware
+    fault. A real failure (MotorError/CameraError/etc.) instead asks
+    whether to skip that sample and continue with the next one.
+    """
 
-    if not yes_no("Begin hardware initialization and acquisition?"):
-        print(f"Configuration retained at {run}")
-        return 0
+    run = initial_run
+    transcript = SessionTranscript(run / "Logs" / "terminal_transcript.txt")
+    transcript.start()
 
-    stop_event = threading.Event()
-    motors = MotorController(ACTIVE_MOTORS, config.timing, dry_run)
-    camera = CameraController(config.camera, dry_run)
-
-    def request_stop(_signum, _frame) -> None:
-        stop_event.set()
-        motors.emergency_stop()
-        camera.emergency_stop()
-
-    def ask_camera_settings() -> tuple[float, float]:
-        exposure_ms = ask_positive_float(
-            "Exposure time (ms)", config.camera.exposure_us / 1000.0
-        )
-        frame_rate_fps = ask_positive_float(
-            "Frame rate (fps)", config.camera.frame_rate_fps
-        )
-        print(
-            f"Retrying with exposure {exposure_ms:.3f} ms, "
-            f"frame rate {frame_rate_fps:.3f} fps."
-        )
-        return exposure_ms * 1000.0, frame_rate_fps
-
-    signal.signal(signal.SIGINT, request_stop)
+    motors: MotorController | None = None
+    camera: CameraController | None = None
     try:
+        environment_ok = print_environment_report()
+        dry_run = yes_no("Use dry-run mode?", default=not environment_ok)
+        if not dry_run and not environment_ok:
+            print("Required production dependencies are missing; non-dry operation is unsafe.")
+            return 2
+
+        camera_settings = CameraSettings()
+        timing_settings = TimingSettings()
+        stop_event = threading.Event()
+        motors = MotorController(ACTIVE_MOTORS, timing_settings, dry_run)
+        camera = CameraController(camera_settings, dry_run)
+
+        def request_stop(_signum, _frame) -> None:
+            stop_event.set()
+            motors.emergency_stop()
+            camera.emergency_stop()
+
+        def ask_camera_settings() -> tuple[float, float]:
+            exposure_ms = ask_positive_float("Exposure time (ms)", camera_settings.exposure_us / 1000.0)
+            frame_rate_fps = ask_positive_float("Frame rate (fps)", camera_settings.frame_rate_fps)
+            print(
+                f"Retrying with exposure {exposure_ms:.3f} ms, "
+                f"frame rate {frame_rate_fps:.3f} fps."
+            )
+            return exposure_ms * 1000.0, frame_rate_fps
+
+        signal.signal(signal.SIGINT, request_stop)
+
+        # One-time bring-up, before any sample is known.
         detect_camera(camera)
         initialize_motors(motors)
-        park_fixed_polarizers(motors, config)
-        guided_camera_setup(config, camera)
-        write_json(run / "Config" / "experiment_config.json", config.to_dict())
+        guided_camera_setup(dry_run, camera_settings)
         camera.initialize(ask_settings=ask_camera_settings)
-        write_json(run / "Config" / "experiment_config.json", config.to_dict())
-        capture_camera_reference(config, camera)
-        confirm_stage("Camera verification complete. Start continuous rotation?")
-        engine = ContinuousEngine(config, motors, camera, stop_event)
-        completed, failed = engine.run_continuous()
-        print(f"Continuous run complete: {completed} frames, {failed} failures.")
-        print(f"Data directory: {run}")
-        return 0
-    except NotImplementedError as exc:
-        print(f"Continuous acquisition not started: {exc}")
-        return 0
+
+        first_sample = True
+        while True:
+            metadata = ask_metadata()
+            transcript.stop()
+            if first_sample:
+                run = rename_run_directory(run, metadata.sample)
+            else:
+                run = create_run_directory(DATA_ROOT, metadata.sample)
+            transcript = SessionTranscript(run / "Logs" / "terminal_transcript.txt")
+            transcript.start()
+
+            fixed_angles, ratio = ask_fixed_and_ratio()
+            config = ExperimentConfig(
+                metadata=metadata,
+                run_directory=run,
+                dry_run=dry_run,
+                fixed_angles=fixed_angles,
+                rotation_ratio=ratio,
+                camera=camera_settings,
+                timing=timing_settings,
+            )
+            write_json(run / "Config" / "rotation_plan.json", continuous_plan(ratio, fixed_angles))
+            write_json(run / "Config" / "experiment_config.json", config.to_dict())
+
+            free = shutil.disk_usage(run).free
+            print(f"Free disk space: {free / 1024**3:.2f} GB")
+            if not yes_no("Begin acquisition for this sample?"):
+                print(f"Configuration retained at {run}")
+                return 0
+
+            if not first_sample:
+                confirm_stage("Remove the previous sample so the beam path is empty, then confirm.")
+
+            try:
+                park_fixed_polarizers(motors, fixed_angles)
+                capture_camera_references(run, dry_run, fixed_angles, motors, camera, camera_settings)
+                confirm_stage(
+                    "Reference and camera verification complete. Insert the sample now, "
+                    "then confirm to start continuous rotation."
+                )
+                engine = ContinuousEngine(config, motors, camera, stop_event)
+                completed, failed = engine.run_continuous()
+                print(f"Continuous run complete: {completed} frames, {failed} failures.")
+                print(f"Data directory: {run}")
+                print("Rehoming motors before disconnect...")
+                try:
+                    motors.home_all()
+                except Exception as exc:
+                    print(f"Post-measurement rehoming warning: {exc}")
+            except NotImplementedError as exc:
+                print(f"Continuous acquisition not started: {exc}")
+                return 0
+            except (EmergencyStopRequested, KeyboardInterrupt):
+                # An emergency stop/Ctrl-C always ends the WHOLE session, never
+                # just this sample — propagate to the outer handler below.
+                raise
+            except Exception as exc:
+                motors.emergency_stop()
+                print(f"Sample failed: {type(exc).__name__}: {exc}")
+                write_error_traceback(run)
+                if not yes_no("This sample failed. Continue with another sample?", default=False):
+                    return 1
+                first_sample = False
+                continue
+
+            first_sample = False
+            if not yes_no("Measure another sample?"):
+                return 0
     except EmergencyStopRequested as exc:
         print(exc)
         return 130
     except KeyboardInterrupt:
-        motors.emergency_stop()
+        if motors is not None:
+            motors.emergency_stop()
         print("Cancelled by operator.")
         return 130
     except Exception as exc:
-        motors.emergency_stop()
-        print(f"Experiment aborted: {type(exc).__name__}: {exc}")
+        if motors is not None:
+            motors.emergency_stop()
+        print(f"Session aborted: {type(exc).__name__}: {exc}")
         write_error_traceback(run)
         return 1
     finally:
-        try:
-            camera.close()
-        except Exception as exc:
-            print(f"Camera cleanup warning: {exc}")
-        motors.close()
+        if camera is not None:
+            try:
+                camera.close()
+            except Exception as exc:
+                print(f"Camera cleanup warning: {exc}")
+        if motors is not None:
+            motors.close()
+        transcript.stop()
 
 
 def main() -> int:
     """Process entry point. There is no --resume: continuous rotation is a
-    single uninterrupted revolution, not a resumable state list."""
+    single uninterrupted revolution, not a resumable state list. A "pending"
+    placeholder run directory is created first (before hardware bring-up, so
+    the transcript captures it), then run_fresh_session() renames it to the
+    first sample's name and loops over as many samples as requested."""
 
-    argparse.ArgumentParser(description=__doc__).parse_args()
-    run = create_run_directory(DATA_ROOT)
-
-    transcript = SessionTranscript(run / "Logs" / "terminal_transcript.txt")
-    transcript.start()
-    try:
-        return run_session(run)
-    except KeyboardInterrupt:
-        print("Session cancelled before hardware acquisition.")
-        return 130
-    except Exception as exc:
-        print(f"Unhandled session error: {type(exc).__name__}: {exc}")
-        write_error_traceback(run)
-        return 1
-    finally:
-        transcript.stop()
+    initial_run = create_run_directory(DATA_ROOT, "pending")
+    return run_fresh_session(initial_run)
 
 
 if __name__ == "__main__":

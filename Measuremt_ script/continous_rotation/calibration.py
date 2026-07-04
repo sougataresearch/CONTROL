@@ -1,4 +1,8 @@
-"""Small, explicit calibration and verification utilities."""
+"""Small, explicit calibration and verification utilities.
+
+Deliberate duplicate of discreate_angle/calibration.py — not imported from
+it, consistent with this folder's no-shared-code design.
+"""
 
 from __future__ import annotations
 
@@ -18,8 +22,8 @@ def move_to_calibration_zero(motors: MotorController, name: str, offset: float) 
     This function only moves the motor and prints the value — it never writes
     to config.py. Once the operator visually confirms ``offset`` really is
     optical zero, they must manually copy it into config.ZERO_OFFSET[name].
-    Not called anywhere in 01_main.py; intended for ad-hoc use (e.g. from a
-    Python REPL or a short standalone script) during initial calibration.
+    Not called anywhere in 01_main.py; intended for ad-hoc use during initial
+    calibration.
     """
 
     motors.move_motor_angle(name, offset)
@@ -65,8 +69,8 @@ def verify_with_reference_sample(
 
     Builds and tears down its own single-axis MotorController rather than
     reusing an experiment's MotorController, since MotorController.names is
-    fixed at construction to whatever config.ACTIVE_MOTORS[mode] chose, and
-    SAMPLE is never one of those.
+    fixed at construction to config.ACTIVE_MOTORS, and SAMPLE is never one
+    of those.
     """
 
     sample_motor = MotorController(("SAMPLE",), timing, dry_run)

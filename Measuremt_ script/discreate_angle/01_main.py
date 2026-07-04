@@ -11,13 +11,15 @@ import time
 import traceback
 from pathlib import Path
 
-from camera_controller import CameraController
+from camera_controller import CameraController, roi_mean, select_roi
 from config import (
     ACTIVE_MOTORS,
     DATA_ROOT,
     ZERO_OFFSET,
+    CameraSettings,
     ExperimentConfig,
     ExperimentMetadata,
+    TimingSettings,
 )
 from measurement_engine import EmergencyStopRequested, MeasurementEngine
 from logger_manager import SessionTranscript
@@ -30,6 +32,7 @@ from utils import (
     parse_angle_spec,
     print_angles,
     optical_to_motor,
+    rename_run_directory,
     write_json,
     yes_no,
 )
@@ -90,7 +93,8 @@ def choose_mode_first() -> str:
 
     This is intentionally the first input call: active hardware depends on it.
     Everything downstream (which motors get discovered/connected/homed, which
-    ACTIVE_MOTORS entry is used) is decided by this single choice.
+    ACTIVE_MOTORS entry is used) is decided by this single choice — for the
+    whole multi-sample session (see run_fresh_session()), not just one sample.
     """
 
     print("1 : 3×3 Mueller Matrix")
@@ -101,7 +105,7 @@ def choose_mode_first() -> str:
 def print_environment_report() -> bool:
     """Run utils.check_environment() and print an OK/MISSING line per check.
     Returns True only if every check passed. The return value feeds directly
-    into the dry-run default and the "can we run for real" gate in run_session()."""
+    into the dry-run default and the "can we run for real" gate."""
 
     print("\nEnvironment verification")
     all_ok = True
@@ -111,26 +115,31 @@ def print_environment_report() -> bool:
     return all_ok
 
 
-def configure_experiment(mode: str, dry_run: bool, run: Path) -> tuple[ExperimentConfig, list]:
-    """Interactively collect everything needed to build an ExperimentConfig
-    and the matching list of MeasurementState objects, for a FRESH (non
-    --resume) run.
+def ask_metadata() -> ExperimentMetadata:
+    """Ask operator/sample/comments.
 
-    Flow: ask operator/sample/comments -> branch on ``mode``:
-      - "3x3": ask PSG_Polarizer and PSA_Analyzer angle lists, preview both,
-        generate_3x3() builds the states.
-      - "4x4": ask the two fixed polarizer angles, then ask PSG_QWP/PSA_QWP
-        angle lists and generate_4x4_discrete().
-    This folder only ever produces discrete states. 4x4 continuous rotation
-    lives entirely in the separate continous_rotation/ folder.
-    Returns (config, states).
+    Split out from the old configure_experiment() because the sample name
+    is needed earlier than the rest of a sample's configuration: it doubles
+    as this round's run-folder name (see utils.create_run_directory()/
+    rename_run_directory()), which must exist before anything about this
+    sample is logged.
     """
 
-    metadata = ExperimentMetadata(
+    return ExperimentMetadata(
         operator=input("Operator Name: ").strip(),
         sample=input("Sample Name: ").strip(),
         comments=input("Comments: ").strip(),
     )
+
+
+def ask_angles_for_mode(mode: str) -> tuple[dict[str, float], dict[str, list[float]], list]:
+    """Ask the mode-specific angle inputs and build this sample's states.
+
+    The other half of the old configure_experiment(): everything here is
+    asked AFTER the sample's run folder already exists (see ask_metadata()),
+    since none of it is needed to name that folder. Returns
+    (fixed_angles, state_inputs, states) — fixed_angles is {} for 3x3.
+    """
 
     if mode == "3x3":
         psg = ask_angles("PSG Polarizer angles (e.g. 360/10 or 0,30,60): ")
@@ -138,39 +147,24 @@ def configure_experiment(mode: str, dry_run: bool, run: Path) -> tuple[Experimen
         print_angles("PSG Polarizer", psg, ZERO_OFFSET["PSG_Polarizer"])
         print_angles("PSA Analyzer", psa, ZERO_OFFSET["PSA_Analyzer"])
         states = generate_3x3(psg, psa)
-        config = ExperimentConfig(
-            mode=mode,
-            metadata=metadata,
-            run_directory=run,
-            dry_run=dry_run,
-            state_inputs={"PSG_Polarizer": psg, "PSA_Analyzer": psa},
-        )
-    else:
-        fixed = {
-            "PSG_Polarizer": ask_float("Fixed PSG Polarizer optical angle: ") % 360,
-            "PSA_Analyzer": ask_float("Fixed PSA Analyzer optical angle: ") % 360,
-        }
-        psg = ask_angles("PSG QWP angles: ")
-        psa = ask_angles("PSA QWP angles: ")
-        print_angles("PSG QWP", psg, ZERO_OFFSET["PSG_QWP"])
-        print_angles("PSA QWP", psa, ZERO_OFFSET["PSA_QWP"])
-        states = generate_4x4_discrete(psg, psa, fixed)
-        config = ExperimentConfig(
-            mode=mode,
-            metadata=metadata,
-            run_directory=run,
-            dry_run=dry_run,
-            fixed_angles=fixed,
-            state_inputs={"PSG_QWP": psg, "PSA_QWP": psa},
-        )
-    print(f"Total states: {len(states)}")
-    return config, states
+        return {}, {"PSG_Polarizer": psg, "PSA_Analyzer": psa}, states
+
+    fixed = {
+        "PSG_Polarizer": ask_float("Fixed PSG Polarizer optical angle: ") % 360,
+        "PSA_Analyzer": ask_float("Fixed PSA Analyzer optical angle: ") % 360,
+    }
+    psg = ask_angles("PSG QWP angles: ")
+    psa = ask_angles("PSA QWP angles: ")
+    print_angles("PSG QWP", psg, ZERO_OFFSET["PSG_QWP"])
+    print_angles("PSA QWP", psa, ZERO_OFFSET["PSA_QWP"])
+    states = generate_4x4_discrete(psg, psa, fixed)
+    return fixed, {"PSG_QWP": psg, "PSA_QWP": psa}, states
 
 
 def states_from_config(config: ExperimentConfig) -> list:
     """Rebuild deterministic states for an explicit ``--resume`` run.
 
-    Mirrors configure_experiment()'s state-generation branch, but reads the
+    Mirrors ask_angles_for_mode()'s state-generation branch, but reads the
     angle lists back from config.state_inputs/fixed_angles (saved in
     Config/experiment_config.json) instead of asking the operator again —
     this is what guarantees a resumed run reproduces the exact same
@@ -192,8 +186,8 @@ def states_from_config(config: ExperimentConfig) -> list:
 
 def confirm_stage(text: str) -> None:
     """Ask a yes/no confirmation before a safety-sensitive step; treats "no"
-    as a full cancellation (raises KeyboardInterrupt, caught in run_session()'s
-    except clause, which stops motors and exits cleanly)."""
+    as a full cancellation (raises KeyboardInterrupt, caught by the calling
+    session function, which stops motors and exits cleanly)."""
 
     if not yes_no(text):
         raise KeyboardInterrupt("Operator cancelled initialization.")
@@ -203,9 +197,9 @@ def initialize_motors(motors: MotorController) -> None:
     """Run the full hardware bring-up sequence for the active motors, with
     an operator confirmation gate before each stage:
     discover -> connect_all -> initialize_all -> enable_all -> home_all ->
-    move_to_optical_zero_all. Called once from run_session(), after the
-    disk-space check and the "Begin hardware initialization?" confirmation.
-    See motor_controller.py for what each stage does on the device side.
+    move_to_optical_zero_all. Called once per session (not per sample —
+    see run_fresh_session()), after the "Begin hardware initialization?"
+    confirmation. See motor_controller.py for what each stage does.
     """
 
     motors.discover()
@@ -221,9 +215,7 @@ def initialize_motors(motors: MotorController) -> None:
     motors.move_to_optical_zero_all()
 
 
-def move_analyzer_to_optical(
-    motors: MotorController, config: ExperimentConfig, optical_angle: float
-) -> None:
+def move_analyzer_to_optical(motors: MotorController, timing: TimingSettings, optical_angle: float) -> None:
     """Move the analyzer using its configured optical-zero calibration.
 
     Converts ``optical_angle`` to a motor angle with ZERO_OFFSET["PSA_Analyzer"],
@@ -239,40 +231,39 @@ def move_analyzer_to_optical(
         f"(motor {motor_angle:.3f}°)."
     )
     motors.move_motor_angle("PSA_Analyzer", motor_angle)
-    time.sleep(config.timing.settling_before_s)
+    time.sleep(timing.settling_before_s)
 
 
-def detect_camera(config: ExperimentConfig, camera: CameraController) -> None:
+def detect_camera(camera: CameraController) -> None:
     """Probe the camera and confirm it before any motor step runs.
 
-    Called first from run_session(), before initialize_motors(), so a
-    missing/broken camera aborts the session immediately instead of after
-    motors have already been connected, initialized, enabled, and homed —
-    homing especially takes real time, and there is no point spending it if
-    the camera was never going to work this run. Only camera.discover()
-    runs here (a brief open-then-release probe); the camera is not actually
-    opened for acquisition until guided_camera_setup()'s Cockpit checks are
-    done and CameraController.initialize() is called.
+    Called first, before initialize_motors(), so a missing/broken camera
+    aborts the session immediately instead of after motors have already
+    been connected, initialized, enabled, and homed — homing especially
+    takes real time, and there is no point spending it if the camera was
+    never going to work. Only camera.discover() runs here (a brief
+    open-then-release probe); the camera is not actually opened for
+    acquisition until guided_camera_setup()'s Cockpit checks are done and
+    CameraController.initialize() is called.
     """
 
-    model, serial = camera.discover()
-    config.camera.model = model
-    config.camera.serial_number = serial
+    camera.discover()
     confirm_stage("Camera detection succeeded. Continue with hardware initialization?")
 
 
 def guided_camera_setup(
-    config: ExperimentConfig,
+    dry_run: bool,
     motors: MotorController,
     camera: CameraController,
+    camera_settings: CameraSettings,
+    timing: TimingSettings,
 ) -> None:
     """Guide Cockpit checks while Python has released the camera.
 
-    Called once from run_session(), after motors reach optical zero and
-    before camera.initialize(). Camera presence was already confirmed
-    earlier by detect_camera(), before any motor step. Sequence (see README
-    "Camera preparation before every experiment" for the operator-facing
-    version):
+    Called once per session (not per sample), after motors reach optical
+    zero and before camera.initialize(). Camera presence was already
+    confirmed earlier by detect_camera(), before any motor step. Sequence
+    (see README "Camera preparation before every experiment"):
       1. Light-source reminder — operator confirms the illumination is on
          before any Cockpit check, since every check below needs it.
       2. Bright check at PSG=0, PSA=0 — operator opens Cockpit, confirms
@@ -283,13 +274,13 @@ def guided_camera_setup(
       5. Operator opens Cockpit one more time to pick exposure/frame rate,
          writes both numbers down, closes Cockpit.
       6. ask_positive_float() collects those two numbers into
-         config.camera.exposure_us / frame_rate_fps (still just requested
+         camera_settings.exposure_us / frame_rate_fps (still just requested
          values — nothing has touched the real camera driver yet; that
          happens later in CameraController.initialize()).
     Dry-run mode skips every Cockpit prompt and keeps the saved defaults.
     """
 
-    if config.dry_run:
+    if dry_run:
         print(
             "Dry-run mode: IDS Peak Cockpit checks are simulated and saved camera "
             "defaults are retained."
@@ -306,7 +297,7 @@ def guided_camera_setup(
     )
     confirm_stage("Is IDS Peak Cockpit fully closed?")
 
-    move_analyzer_to_optical(motors, config, 90.0)
+    move_analyzer_to_optical(motors, timing, 90.0)
     print("\nCAMERA CHECK 2 — DARK STATE")
     input(
         "Open IDS Peak Cockpit, confirm the 0_90 image is darker, then CLOSE "
@@ -314,7 +305,7 @@ def guided_camera_setup(
     )
     confirm_stage("Is IDS Peak Cockpit fully closed?")
 
-    move_analyzer_to_optical(motors, config, 0.0)
+    move_analyzer_to_optical(motors, timing, 0.0)
     print("\nCAMERA CHECK 3 — SELECT EXPERIMENT SETTINGS")
     input(
         "Open IDS Peak Cockpit at 0_0, choose exposure time and frame rate, "
@@ -324,65 +315,98 @@ def guided_camera_setup(
 
     exposure_ms = ask_positive_float(
         "Exposure time selected in IDS Peak Cockpit (ms)",
-        config.camera.exposure_us / 1000.0,
+        camera_settings.exposure_us / 1000.0,
     )
     frame_rate_fps = ask_positive_float(
         "Frame rate selected in IDS Peak Cockpit (fps)",
-        config.camera.frame_rate_fps,
+        camera_settings.frame_rate_fps,
     )
-    config.camera.exposure_us = exposure_ms * 1000.0
-    config.camera.frame_rate_fps = frame_rate_fps
+    camera_settings.exposure_us = exposure_ms * 1000.0
+    camera_settings.frame_rate_fps = frame_rate_fps
     print(f"Requested experiment exposure: {exposure_ms:.3f} ms")
     print(f"Requested experiment frame rate: {frame_rate_fps:.3f} fps")
 
 
 def capture_camera_references(
-    config: ExperimentConfig,
+    run_directory: Path,
+    dry_run: bool,
     motors: MotorController,
     camera: CameraController,
+    camera_settings: CameraSettings,
+    timing: TimingSettings,
 ) -> None:
     """Capture quantitative bright/dark references without modifying pixels.
 
-    Called once from run_session(), after camera.initialize() and before
-    the measurement loop starts. Moves to PSA optical 0 (bright) and 90
-    (dark), saves each as a real BMP via camera.test_frame(), computes the
-    bright/dark mean ratio, and — for real (non-dry-run) hardware — warns
-    (and asks for confirmation to continue) if the bright reference isn't
-    actually brighter than dark, or if it contains saturated (255) pixels.
-    This is the software's only automatic sanity check that the polarizers
-    are actually crossed/aligned correctly before committing to a full scan.
+    Called for EVERY sample (not just once — the operator may have bumped
+    the setup while swapping samples by hand), after camera.initialize()
+    the first time and before each sample's "insert the sample" prompt.
+    Moves to PSA optical 0 (bright) and 90 (dark), saves each as a real BMP
+    via camera.test_frame(). The bright/dark ratio itself is computed over
+    an automatically-selected ROI (see camera_controller.select_roi())
+    rather than the whole frame, since edge vignetting/glare can distort a
+    whole-frame average independent of actual polarization contrast — the
+    ROI is picked once per sample, on that sample's bright frame, and reused
+    on its dark frame so both means come from the same pixels. For real
+    (non-dry-run) hardware, warns (and asks for confirmation to continue)
+    if the bright reference isn't actually brighter than dark, or if it
+    contains saturated (255) pixels anywhere in the frame. This is the
+    software's only automatic sanity check that the polarizers are actually
+    crossed/aligned correctly before committing to a full scan.
     """
 
-    reference_dir = config.run_directory / "Results"
-    move_analyzer_to_optical(motors, config, 0.0)
-    print("Capturing bright reference at PSG=0°, PSA=0°...")
-    bright = camera.test_frame(reference_dir / "BrightReference_0_0.bmp")
+    reference_dir = run_directory / "Results"
+    move_analyzer_to_optical(motors, timing, 0.0)
 
-    move_analyzer_to_optical(motors, config, 90.0)
-    print("Capturing dark reference at PSG=0°, PSA=90°...")
-    dark = camera.test_frame(reference_dir / "DarkReference_0_90.bmp")
-    move_analyzer_to_optical(motors, config, 0.0)
-
-    bright_mean = float(bright["mean"])
-    dark_mean = float(dark["mean"])
-    contrast = float("inf") if dark_mean == 0 else bright_mean / dark_mean
-    print(
-        f"Polarization reference result — bright mean: {bright_mean:.3f}, "
-        f"dark mean: {dark_mean:.3f}, bright/dark ratio: {contrast:.3f}"
-    )
-    if config.dry_run:
+    if dry_run:
+        print("Capturing bright reference at PSG=0°, PSA=0°...")
+        camera.test_frame(reference_dir / "BrightReference_0_0.bmp")
+        move_analyzer_to_optical(motors, timing, 90.0)
+        print("Capturing dark reference at PSG=0°, PSA=90°...")
+        camera.test_frame(reference_dir / "DarkReference_0_90.bmp")
+        move_analyzer_to_optical(motors, timing, 0.0)
         print(
             "Dry-run mode: reference files and statistics were verified, but "
-            "physical polarization contrast cannot be evaluated."
+            "physical polarization contrast cannot be evaluated (no ROI selected)."
         )
         return
 
+    confirm_stage(
+        "Illumination is ON? (required before the automatic bright/dark reference capture)"
+    )
+
+    print("Capturing bright reference at PSG=0°, PSA=0°...")
+    bright = camera.test_frame(reference_dir / "BrightReference_0_0.bmp")
+    roi = select_roi(
+        camera.last_image_array,
+        camera_settings.roi_window_size,
+        camera_settings.roi_stride,
+        camera_settings.roi_min_mean,
+    )
+    write_json(
+        run_directory / "Config" / "roi.json",
+        {"x": roi[0], "y": roi[1], "width": roi[2], "height": roi[3]},
+    )
+    bright_mean = roi_mean(camera.last_image_array, roi)
+
+    move_analyzer_to_optical(motors, timing, 90.0)
+    print("Capturing dark reference at PSG=0°, PSA=90°...")
+    dark = camera.test_frame(reference_dir / "DarkReference_0_90.bmp")
+    dark_mean = roi_mean(camera.last_image_array, roi)
+    move_analyzer_to_optical(motors, timing, 0.0)
+
+    contrast = float("inf") if dark_mean == 0 else bright_mean / dark_mean
+    print(
+        f"Polarization reference result (ROI {roi[2]}x{roi[3]} at {roi[0]},{roi[1]}) — "
+        f"bright mean: {bright_mean:.3f}, dark mean: {dark_mean:.3f}, "
+        f"bright/dark ratio: {contrast:.3f}"
+    )
+
     problems = []
     if bright_mean <= dark_mean:
-        problems.append("bright-reference mean is not greater than dark-reference mean")
+        problems.append("bright-reference ROI mean is not greater than dark-reference ROI mean")
     if int(bright["saturated_pixels"]) > 0:
         problems.append(
-            f"bright reference contains {bright['saturated_pixels']} pixels at 255"
+            f"bright reference contains {bright['saturated_pixels']} pixels at 255 (whole frame)"
         )
     if problems:
         print("CAMERA VERIFICATION WARNING: " + "; ".join(problems))
@@ -395,9 +419,10 @@ def write_error_traceback(run: Path) -> None:
     """Persist the full active exception while also showing it in the transcript.
 
     Must be called from inside an ``except`` block (relies on
-    traceback.format_exc() reading the currently-handled exception). Called
-    from both run_session()'s and main()'s except clauses, writing
-    Logs/error_traceback.txt.
+    traceback.format_exc() reading the currently-handled exception).
+    Writes Logs/error_traceback.txt inside ``run`` (the CURRENT sample's
+    folder, which may differ from the session's initial folder — see
+    run_fresh_session()).
     """
 
     details = traceback.format_exc()
@@ -407,64 +432,49 @@ def write_error_traceback(run: Path) -> None:
     print(details)
 
 
-def run_session(
-    arguments: argparse.Namespace,
-    run: Path,
-    resumed_config: ExperimentConfig | None,
-) -> int:
-    """Run one fully transcripted operator session — the top-level flow
-    described in the README's sequence diagram, from mode selection through
-    the final report. Returns a process exit code (0 success, 1 error,
-    2 blocked by a pre-check, 130 stopped/cancelled).
+def check_disk_space(run: Path, state_count: int) -> bool:
+    """Print the estimated-vs-free disk space for ``state_count`` images and
+    return whether there's enough room. Called once per sample (not just
+    once per session), since earlier samples in the same session consume
+    space that reduces what's left for later ones."""
 
-    High-level steps:
-      1. Mode: choose_mode_first() for a fresh run, or take it from
-         resumed_config for --resume (so a resume can never switch modes
-         mid-experiment).
-      2. print_environment_report() + dry-run choice (forced True if the
-         environment isn't production-ready).
-      3. configure_experiment() (fresh) or states_from_config() (resume) to
-         get the ExperimentConfig and MeasurementState list.
-      4. Disk-space check (utils.estimate_disk_bytes vs shutil.disk_usage).
-      5. "Begin hardware initialization and acquisition?" confirmation.
-      6. Build MotorController/CameraController, install the SIGINT
-         (Ctrl-C) handler that triggers stop_event + emergency stops.
-      7. initialize_motors() -> guided_camera_setup() -> camera.initialize()
-         -> capture_camera_references() -> final confirmation ->
-         MeasurementEngine.run_discrete(states).
-      8. Always (success or failure): camera.close() and motors.close() in
-         the ``finally`` block.
-    Errors: EmergencyStopRequested/KeyboardInterrupt return 130; any other
-    exception stops the motors, writes the traceback, and returns 1.
-    """
-
-    # Fresh experiments ask mode first. Resumed experiments intentionally obtain it
-    # from the immutable saved configuration, preventing an incompatible selection.
-    if resumed_config is not None:
-        config = resumed_config
-        mode = config.mode
-    else:
-        mode = choose_mode_first()
-    environment_ok = print_environment_report()
-    dry_run = config.dry_run if resumed_config is not None else yes_no(
-        "Use dry-run mode?", default=not environment_ok
-    )
-    if not dry_run and not environment_ok:
-        print("Required production dependencies are missing; non-dry operation is unsafe.")
-        return 2
-
-    if resumed_config is not None:
-        states = states_from_config(config)
-        print(f"Resuming saved {mode} experiment: {run}")
-    else:
-        config, states = configure_experiment(mode, dry_run, run)
-        write_json(run / "Config" / "experiment_config.json", config.to_dict())
-
-    estimate = estimate_disk_bytes(len(states))
+    estimate = estimate_disk_bytes(state_count)
     free = shutil.disk_usage(run).free
     print(f"Estimated image space: {estimate / 1024**3:.2f} GB; free: {free / 1024**3:.2f} GB")
     if estimate > free:
         print("Insufficient disk space for the planned images.")
+        return False
+    return True
+
+
+def run_resumed_session(
+    arguments: argparse.Namespace,
+    run: Path,
+    resumed_config: ExperimentConfig,
+) -> int:
+    """Resume a single interrupted run from its checkpoint.
+
+    Deliberately does NOT enter the multi-sample loop that a fresh session
+    does (see run_fresh_session()) — it recovers exactly the one saved
+    experiment, using the mode/angles/camera settings frozen in its
+    Config/experiment_config.json, then exits. Run the script again without
+    --resume afterward to measure additional samples.
+    Returns a process exit code (0 success, 1 error, 2 blocked by a
+    pre-check, 130 stopped/cancelled).
+    """
+
+    config = resumed_config
+    mode = config.mode
+    environment_ok = print_environment_report()
+    dry_run = config.dry_run
+    if not dry_run and not environment_ok:
+        print("Required production dependencies are missing; non-dry operation is unsafe.")
+        return 2
+
+    states = states_from_config(config)
+    print(f"Resuming saved {mode} experiment: {run}")
+
+    if not check_disk_space(run, len(states)):
         return 2
     if not yes_no("Begin hardware initialization and acquisition?"):
         print(f"Configuration retained at {run}")
@@ -476,17 +486,10 @@ def run_session(
 
     def request_stop(_signum, _frame) -> None:
         stop_event.set()
-        # Stop immediately instead of waiting for the blocking state operation to
-        # return. Both calls are best-effort and safe when running without hardware.
         motors.emergency_stop()
         camera.emergency_stop()
 
     def ask_camera_settings() -> tuple[float, float]:
-        """CameraController.initialize()'s retry callback: re-prompt for
-        exposure/frame rate after the camera rejected the previous values,
-        so a bad/swapped value doesn't force redoing motor homing/connecting.
-        See camera_controller.CameraSettingsError."""
-
         exposure_ms = ask_positive_float(
             "Exposure time (ms)", config.camera.exposure_us / 1000.0
         )
@@ -501,20 +504,26 @@ def run_session(
 
     signal.signal(signal.SIGINT, request_stop)
     try:
-        detect_camera(config, camera)
+        detect_camera(camera)
         initialize_motors(motors)
-        guided_camera_setup(config, motors, camera)
-        # Save operator-selected values before opening the camera, then save again
-        # after initialization to include the actual values read back from hardware.
+        guided_camera_setup(dry_run, motors, camera, config.camera, config.timing)
         write_json(run / "Config" / "experiment_config.json", config.to_dict())
         camera.initialize(ask_settings=ask_camera_settings)
         write_json(run / "Config" / "experiment_config.json", config.to_dict())
-        capture_camera_references(config, motors, camera)
-        confirm_stage("Camera verification complete. Start the measurement?")
+        capture_camera_references(run, dry_run, motors, camera, config.camera, config.timing)
+        confirm_stage(
+            "Reference and camera verification complete. Insert the sample now, "
+            "then confirm to start the measurement."
+        )
         engine = MeasurementEngine(config, motors, camera, stop_event)
         completed, failed = engine.run_discrete(states)
         print(f"Experiment complete: {completed} images, {failed} failures.")
         print(f"Data directory: {run}")
+        print("Rehoming motors before disconnect...")
+        try:
+            motors.home_all()
+        except Exception as exc:
+            print(f"Post-measurement rehoming warning: {exc}")
         return 0
     except EmergencyStopRequested as exc:
         print(exc)
@@ -529,9 +538,6 @@ def run_session(
         write_error_traceback(run)
         return 1
     finally:
-        # camera.close() is defensive and should never raise, but a second
-        # failure here must still never prevent motors.close() from running —
-        # skipping it left the Kinesis connections undisconnected before.
         try:
             camera.close()
         except Exception as exc:
@@ -539,13 +545,192 @@ def run_session(
         motors.close()
 
 
+def run_fresh_session(initial_run: Path) -> int:
+    """Multi-sample session: hardware bring-up once, then loop over as many
+    samples as the operator wants, each getting its own
+    Data/YYYY-MM-DD_<sample name> folder.
+
+    Owns its own transcript lifecycle (unlike run_resumed_session(), which
+    lets main() manage one unchanging transcript for the whole call) because
+    each new sample gets a fresh run folder, and therefore a fresh
+    Logs/terminal_transcript.txt, once its name is known. The transcript is
+    stopped before every rename/create and a new one started right after —
+    Windows/NTFS refuses to rename a directory while a file inside it (the
+    log itself) is still open, even by the same process, so this is
+    required, not just tidy. The very first sample renames ``initial_run``
+    (a "pending" placeholder main() created before mode selection) in
+    place; every later sample gets a genuinely new folder via
+    create_run_directory(), since its data must not land in the previous
+    sample's folder. Either way the log's content survives intact — only
+    its path changes — so the new transcript just appends and continues it.
+
+    Mode is chosen once and fixed for the whole session (switching between
+    3x3/4x4 mid-session would change which motors are active, which really
+    would require a reconnect — that stays a restart-the-script situation).
+    Bright/dark reference verification IS repeated for every sample, since
+    the operator may bump the setup while swapping samples by hand.
+
+    If one sample's measurement fails (a real MotorError/CameraError/etc. —
+    not an emergency stop, which always ends the whole session immediately),
+    the operator is asked whether to skip it and continue with the next
+    sample, rather than the entire remaining queue being aborted.
+
+    Returns a process exit code (0 success/expected-stop, 1 error,
+    2 blocked by a pre-check, 130 stopped/cancelled).
+    """
+
+    run = initial_run
+    transcript = SessionTranscript(run / "Logs" / "terminal_transcript.txt")
+    transcript.start()
+
+    motors: MotorController | None = None
+    camera: CameraController | None = None
+    try:
+        mode = choose_mode_first()
+        environment_ok = print_environment_report()
+        dry_run = yes_no("Use dry-run mode?", default=not environment_ok)
+        if not dry_run and not environment_ok:
+            print("Required production dependencies are missing; non-dry operation is unsafe.")
+            return 2
+
+        camera_settings = CameraSettings()
+        timing_settings = TimingSettings()
+        stop_event = threading.Event()
+        motors = MotorController(ACTIVE_MOTORS[mode], timing_settings, dry_run)
+        camera = CameraController(camera_settings, dry_run)
+
+        def request_stop(_signum, _frame) -> None:
+            stop_event.set()
+            motors.emergency_stop()
+            camera.emergency_stop()
+
+        def ask_camera_settings() -> tuple[float, float]:
+            exposure_ms = ask_positive_float("Exposure time (ms)", camera_settings.exposure_us / 1000.0)
+            frame_rate_fps = ask_positive_float("Frame rate (fps)", camera_settings.frame_rate_fps)
+            print(
+                f"Retrying with exposure {exposure_ms:.3f} ms, "
+                f"frame rate {frame_rate_fps:.3f} fps."
+            )
+            return exposure_ms * 1000.0, frame_rate_fps
+
+        signal.signal(signal.SIGINT, request_stop)
+
+        # One-time bring-up, before any sample is known.
+        detect_camera(camera)
+        initialize_motors(motors)
+        guided_camera_setup(dry_run, motors, camera, camera_settings, timing_settings)
+        camera.initialize(ask_settings=ask_camera_settings)
+
+        first_sample = True
+        while True:
+            metadata = ask_metadata()
+            # The transcript's log file must be closed before the folder
+            # containing it can be renamed — Windows/NTFS refuses to rename a
+            # directory while any file inside it is still open, even by the
+            # same process. Stopping first (for every sample, including the
+            # first) and starting a new transcript right after is what makes
+            # the rename safe; the log's content survives the rename either
+            # way, so appending at the new path continues it seamlessly.
+            transcript.stop()
+            if first_sample:
+                run = rename_run_directory(run, metadata.sample)
+            else:
+                run = create_run_directory(DATA_ROOT, metadata.sample)
+            transcript = SessionTranscript(run / "Logs" / "terminal_transcript.txt")
+            transcript.start()
+
+            fixed_angles, state_inputs, states = ask_angles_for_mode(mode)
+            print(f"Total states: {len(states)}")
+            config = ExperimentConfig(
+                mode=mode,
+                metadata=metadata,
+                run_directory=run,
+                dry_run=dry_run,
+                fixed_angles=fixed_angles,
+                state_inputs=state_inputs,
+                camera=camera_settings,
+                timing=timing_settings,
+            )
+            write_json(run / "Config" / "experiment_config.json", config.to_dict())
+
+            if not check_disk_space(run, len(states)):
+                return 2
+            if not yes_no("Begin acquisition for this sample?"):
+                print(f"Configuration retained at {run}")
+                return 0
+
+            if not first_sample:
+                confirm_stage("Remove the previous sample so the beam path is empty, then confirm.")
+
+            try:
+                capture_camera_references(run, dry_run, motors, camera, camera_settings, timing_settings)
+                confirm_stage(
+                    "Reference and camera verification complete. Insert the sample now, "
+                    "then confirm to start the measurement."
+                )
+                engine = MeasurementEngine(config, motors, camera, stop_event)
+                completed, failed = engine.run_discrete(states)
+                print(f"Experiment complete: {completed} images, {failed} failures.")
+                print(f"Data directory: {run}")
+                print("Rehoming motors before disconnect...")
+                try:
+                    motors.home_all()
+                except Exception as exc:
+                    print(f"Post-measurement rehoming warning: {exc}")
+            except (EmergencyStopRequested, KeyboardInterrupt):
+                # An emergency stop/Ctrl-C always ends the WHOLE session, never
+                # just this sample — propagate to the outer handler below.
+                raise
+            except Exception as exc:
+                motors.emergency_stop()
+                print(f"Sample failed: {type(exc).__name__}: {exc}")
+                write_error_traceback(run)
+                if not yes_no("This sample failed. Continue with another sample?", default=False):
+                    return 1
+                first_sample = False
+                continue
+
+            first_sample = False
+            if not yes_no("Measure another sample?"):
+                return 0
+    except EmergencyStopRequested as exc:
+        print(exc)
+        return 130
+    except KeyboardInterrupt:
+        if motors is not None:
+            motors.emergency_stop()
+        print("Cancelled by operator.")
+        return 130
+    except Exception as exc:
+        if motors is not None:
+            motors.emergency_stop()
+        print(f"Session aborted: {type(exc).__name__}: {exc}")
+        write_error_traceback(run)
+        return 1
+    finally:
+        if camera is not None:
+            try:
+                camera.close()
+            except Exception as exc:
+                print(f"Camera cleanup warning: {exc}")
+        if motors is not None:
+            motors.close()
+        transcript.stop()
+
+
 def main() -> int:
     """Process entry point (called from ``if __name__ == "__main__"`` at the
-    bottom of this file). Parses --resume, opens the run directory (new or
-    existing), wraps the whole session in a SessionTranscript so every print
-    and prompt is captured to Logs/terminal_transcript.txt, and delegates to
-    run_session(). This is the ONLY function that should be invoked to start
-    the program — see README "Which file should I run?".
+    bottom of this file). This is the ONLY function that should be invoked
+    to start the program — see README "Which file should I run?".
+
+    Dispatches to one of two self-contained session functions, each owning
+    its own transcript/error-traceback/hardware-cleanup lifecycle:
+      --resume RUN_DIRECTORY -> run_resumed_session(): recovers exactly the
+        one saved experiment in RUN_DIRECTORY, no multi-sample loop.
+      (no --resume) -> run_fresh_session(): a "pending" placeholder run
+        directory is created first (before mode selection, so the
+        transcript captures it), then run_fresh_session() renames it to the
+        first sample's name and loops over as many samples as requested.
     """
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -557,7 +742,6 @@ def main() -> int:
     )
     arguments = parser.parse_args()
 
-    resumed_config: ExperimentConfig | None = None
     if arguments.resume:
         run = arguments.resume.resolve()
         config_path = run / "Config" / "experiment_config.json"
@@ -568,24 +752,23 @@ def main() -> int:
         )
         # The command-line path is authoritative if the folder was moved.
         resumed_config.run_directory = run
-    else:
-        # Creating the run before the first question lets the transcript capture
-        # mode selection and every later terminal interaction.
-        run = create_run_directory(DATA_ROOT)
 
-    transcript = SessionTranscript(run / "Logs" / "terminal_transcript.txt")
-    transcript.start()
-    try:
-        return run_session(arguments, run, resumed_config)
-    except KeyboardInterrupt:
-        print("Session cancelled before hardware acquisition.")
-        return 130
-    except Exception as exc:
-        print(f"Unhandled session error: {type(exc).__name__}: {exc}")
-        write_error_traceback(run)
-        return 1
-    finally:
-        transcript.stop()
+        transcript = SessionTranscript(run / "Logs" / "terminal_transcript.txt")
+        transcript.start()
+        try:
+            return run_resumed_session(arguments, run, resumed_config)
+        except KeyboardInterrupt:
+            print("Session cancelled before hardware acquisition.")
+            return 130
+        except Exception as exc:
+            print(f"Unhandled session error: {type(exc).__name__}: {exc}")
+            write_error_traceback(run)
+            return 1
+        finally:
+            transcript.stop()
+
+    initial_run = create_run_directory(DATA_ROOT, "pending")
+    return run_fresh_session(initial_run)
 
 
 if __name__ == "__main__":

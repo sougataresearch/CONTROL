@@ -132,14 +132,24 @@ Connect and power the required motors and camera, then run:
 python 01_main.py
 ```
 
-The program performs the following sequence:
+The program performs the following sequence. Everything above the dashed
+line happens **once** for the whole session; everything below it repeats
+**per sample** — see "Measuring multiple samples in one session" below.
 
 ```text
 Select 3×3 or 4×4 mode
         ↓
 Verify software environment
         ↓
-Enter operator and sample information
+Detect the camera (fails fast, before any motor time is spent)
+        ↓
+Discover, connect, initialize, enable, and home the required motors
+        ↓
+Move to optical-zero offsets
+        ↓
+Initialize and test the camera (Cockpit exposure/frame-rate selection)
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+Enter operator, sample name, and comments (sample name -> run folder name)
         ↓
 Enter optical-angle states
         ↓
@@ -147,29 +157,46 @@ Preview optical angles, motor angles, and total states
         ↓
 Estimate required disk space
         ↓
-Detect the camera (fails fast, before any motor time is spent)
+Capture bright/dark reference (auto ROI) — repeated every sample
         ↓
-Discover required motors
+Insert the sample, then run measurement states
         ↓
-Connect motors sequentially
+Rehome motors, write final checkpoint and report
         ↓
-Load K10CR2 settings
-        ↓
-Enable motors
-        ↓
-Home motors
-        ↓
-Move to optical-zero offsets
-        ↓
-Initialize and test the camera
-        ↓
-Run measurement states
-        ↓
-Write final checkpoint and report
+Ask: measure another sample, or done?
 ```
 
 The software asks for confirmation before safety-sensitive initialization
 stages.
+
+## Measuring multiple samples in one session
+
+`01_main.py` keeps the camera and motors connected for as many samples as
+you want to measure — you don't need to restart the script between them.
+After one sample's measurement completes, you're asked **"Measure another
+sample?"**. Answering yes takes you back to "Enter operator, sample name,
+and comments" for the next sample, reusing the same hardware bring-up
+(mode, motor connections, camera exposure/frame-rate) from the start of the
+session — only the sample-specific steps (angles, reference capture,
+measurement) repeat.
+
+Each sample gets its own `Data/YYYY-MM-DD_<sample name>` folder (see
+"Output folders" below) and its own `Logs/terminal_transcript.txt` — the
+one-time hardware bring-up only appears in the **first** sample's
+transcript, since it only happened once.
+
+Before every sample after the first, you're asked to confirm the
+**previous** sample has been removed (the beam path must be empty for the
+bright/dark reference check that follows).
+
+If a sample's measurement fails for a real reason (a motor or camera
+error — not an emergency stop, which always ends the whole session
+immediately), you're asked whether to skip that sample and continue with
+the next one, rather than losing the rest of the queue.
+
+Mode (3×3 vs 4×4) is fixed for the whole session — switching between them
+mid-session would change which motors are active, which really does
+require a reconnect, so that stays a restart-the-script situation.
 
 ## Camera preparation before every experiment
 
@@ -195,9 +222,29 @@ optical zero:
     camera rejects either value, it prints the error and asks for both
     values again — see "If the exposure time or frame rate..." below.
 11. The requested and actual camera values are printed and saved.
-12. Python captures automatic `0_0` bright and `0_90` dark references.
-13. Minimum, maximum, mean, and pixels equal to 255 are reported.
-14. A final confirmation is required before measurement begins.
+12. Python asks you to confirm the illumination is still ON — there is no
+    physical shutter, so this catches the light having been switched off
+    during the Cockpit checks above, before the automatic captures below.
+13. Python captures automatic `0_0` bright and `0_90` dark references.
+    Minimum, maximum, mean, and pixels equal to 255 are reported for the
+    whole frame, but the bright/dark **ratio** is computed only over an
+    automatically-selected ROI — see "Bright/dark reference ROI" below.
+14. You are asked to insert the sample now (everything above runs with an
+    empty beam path, since a sample would distort the reference checks).
+15. A final confirmation is required before measurement begins.
+
+### Bright/dark reference ROI
+
+The bright/dark ratio check does not average the whole frame — vignetting
+or edge glare can shift a whole-frame mean independent of actual
+polarization contrast. Instead, `camera_controller.select_roi()` slides a
+window (`CameraSettings.roi_window_size`, step `roi_stride`) across the
+bright reference frame and picks the **flattest** region (lowest standard
+deviation) among windows that are bright enough (`roi_min_mean`) and free of
+saturated pixels — deliberately not just the brightest spot, so an uneven
+(e.g. Gaussian) beam profile doesn't win over a genuinely flat-illuminated
+area. That same region is then reused on the dark frame so both means come
+from identical pixels. The chosen region is saved to `Config/roi.json`.
 
 Do not leave IDS Peak Cockpit open while Python is acquiring images. Cockpit
 and Python can compete for control of the same camera.
@@ -307,11 +354,13 @@ Software stopping is not a substitute for laboratory hardware safety controls.
 
 ## Output folders
 
-Each run creates:
+Each sample creates its own folder, named after the sample name you typed
+in (sanitized for the filesystem; a repeated sample name gets a `_02`,
+`_03`, ... suffix rather than overwriting the first):
 
 ```text
 Data/
-└── YYYY-MM-DD_RunXX/
+└── YYYY-MM-DD_<sample name>/
     ├── Images/
     ├── Logs/
     ├── Config/
@@ -328,6 +377,7 @@ Important files:
 - `Logs/terminal_transcript.txt` — terminal output, prompts, and operator answers
 - `Logs/error_traceback.txt` — full technical traceback when an error occurs
 - `Config/experiment_config.json` — complete saved experiment configuration
+- `Config/roi.json` — the auto-selected bright/dark reference ROI (x, y, width, height)
 - `Checkpoints/checkpoint.json` — last successfully completed state
 - `Reports/ExperimentReport.txt` — final experiment summary
 - `Results/BrightReference_0_0.bmp` — pre-measurement bright reference
@@ -342,8 +392,12 @@ and applied camera settings, image statistics, warnings, and retry messages.
 Use the directory of the interrupted run:
 
 ```powershell
-python 01_main.py --resume Data\YYYY-MM-DD_RunXX
+python 01_main.py --resume "Data\YYYY-MM-DD_<sample name>"
 ```
+
+`--resume` recovers exactly that one sample — it does not enter the
+multi-sample loop described above. Once it finishes, run `python 01_main.py`
+again (without `--resume`) to measure additional samples.
 
 The saved configuration is loaded, and acquisition continues after the last
 successful checkpoint. Do not manually alter images or the checkpoint before
@@ -374,7 +428,7 @@ comments open to cross-check both at once.
 
 | Setting | File / location | What it controls |
 |---|---|---|
-| `MOTOR_SN` | `config.py` | USB serial number of each K10CR2/M rotator. Must match the physical device for that axis or `MotorController.discover()` raises `MotorError`. |
+| `MOTOR_SN` | `config.py` | USB serial number of each K10CR2/M rotator, plus a `"SAMPLE"` entry for the optional motorized reference-optic stage used only by `calibration.verify_with_reference_sample()` (not part of any experiment's `ACTIVE_MOTORS`). Must match the physical device for that axis or `MotorController.discover()` raises `MotorError`. |
 | `ZERO_OFFSET` | `config.py` | Motor angle that equals optical zero for each axis, found with `calibration.py`. Wrong values silently rotate every measurement by a constant offset. |
 | `KINESIS_DIR` | `config.py` | Path to the Thorlabs Kinesis install. Checked by `utils.check_environment()` and used by `motor_controller._load_kinesis()`. |
 | `MOTOR_SETTINGS_NAME` | `config.py` | Must match the K10CR2 device-settings profile name shown in Kinesis. |
@@ -386,11 +440,11 @@ comments open to cross-check both at once.
 
 | Prompt | Asked by | Stored in |
 |---|---|---|
-| 3×3 vs 4×4 mode | `choose_mode_first()` | `ExperimentConfig.mode` |
-| Dry-run vs real | `run_session()` (`utils.yes_no`) | `ExperimentConfig.dry_run` |
-| Operator / sample / comments | `configure_experiment()` | `ExperimentConfig.metadata` |
-| PSG/PSA (or QWP) angle lists | `ask_angles()` | `ExperimentConfig.state_inputs` |
-| Fixed polarizer angles (4×4 only) | `ask_float()` in `configure_experiment()` | `ExperimentConfig.fixed_angles` |
+| 3×3 vs 4×4 mode | `choose_mode_first()` (once per session) | `ExperimentConfig.mode` |
+| Dry-run vs real | `run_fresh_session()` (`utils.yes_no`, once per session) | `ExperimentConfig.dry_run` |
+| Operator / sample / comments | `ask_metadata()` (per sample) | `ExperimentConfig.metadata` |
+| PSG/PSA (or QWP) angle lists | `ask_angles_for_mode()` (per sample) | `ExperimentConfig.state_inputs` |
+| Fixed polarizer angles (4×4 only) | `ask_float()` in `ask_angles_for_mode()` | `ExperimentConfig.fixed_angles` |
 | Exposure time (ms) / frame rate (fps) | `guided_camera_setup()` (`ask_positive_float`) | `ExperimentConfig.camera.exposure_us` / `frame_rate_fps` |
 | Every safety confirmation (`confirm_stage`) | throughout `01_main.py` | not stored — answering "no" cancels that stage |
 
@@ -407,26 +461,29 @@ zero, new lab PC, etc.).
 | Function | What it does |
 |---|---|
 | `ask_choice` / `ask_float` / `ask_positive_float` / `ask_angles` | Loop-until-valid input helpers for a choice set, a plain float, a positive float (camera exposure/frame rate), and an angle spec (`utils.parse_angle_spec`). |
-| `choose_mode_first` | First prompt of every fresh run: 3×3 vs 4×4. Fixes which motors are active for the rest of the run. |
+| `choose_mode_first` | First prompt of every fresh session: 3×3 vs 4×4. Fixes which motors are active for the whole session (all samples). |
 | `print_environment_report` | Runs `utils.check_environment()`, prints OK/MISSING per check, returns whether all passed. |
-| `configure_experiment` | Asks operator/sample/comments, then mode-specific angle prompts; builds the `ExperimentConfig` and the `MeasurementState` list (via `state_generator`) for a fresh run. |
+| `ask_metadata` | Asks operator/sample/comments for one sample. The sample name doubles as that sample's run-folder name. |
+| `ask_angles_for_mode` | Asks the mode-specific angle prompts and builds that sample's `ExperimentConfig` pieces (`fixed_angles`, `state_inputs`) and `MeasurementState` list via `state_generator`. |
 | `states_from_config` | Rebuilds the identical `MeasurementState` list from a saved config, for `--resume`, without re-asking the operator. |
 | `confirm_stage` | Yes/no gate before a safety-sensitive step; "no" cancels the whole session. |
 | `detect_camera` | Probes the camera (`camera.discover()`) and confirms it, before any motor step — so a missing camera aborts before motor time is spent homing. |
-| `initialize_motors` | Runs discover → connect → initialize → enable → home → move-to-optical-zero, each behind a `confirm_stage`. |
+| `initialize_motors` | Runs discover → connect → initialize → enable → home → move-to-optical-zero, each behind a `confirm_stage`. Runs once per session. |
 | `move_analyzer_to_optical` | Moves `PSA_Analyzer` to a given optical angle (used by camera checks/references, not the main measurement loop). |
-| `guided_camera_setup` | Confirms the light source is on, then walks the operator through the IDS Peak Cockpit bright/dark/exposure checks and records the chosen exposure/frame rate. |
-| `capture_camera_references` | Captures and verifies the `BrightReference_0_0.bmp` / `DarkReference_0_90.bmp` images and checks bright > dark with no saturation. |
-| `write_error_traceback` | Saves the current exception's full traceback to `Logs/error_traceback.txt`. |
-| `ask_camera_settings` (nested in `run_session`) | The `ask_settings` callback passed to `camera.initialize()`; re-prompts for exposure/frame rate when the camera rejects them. |
-| `run_session` | The full top-to-bottom run: mode → environment → config → disk check → hardware init → camera setup → measurement loop → cleanup. Its `finally` block always runs `camera.close()` and then `motors.close()`, even if `camera.close()` itself raises, so a camera cleanup problem can never leave the motors connected/undisconnected. Returns the process exit code. |
-| `main` | Entry point: parses `--resume`, opens/creates the run directory, starts/stops the `SessionTranscript`, calls `run_session`. |
+| `guided_camera_setup` | Confirms the light source is on, then walks the operator through the IDS Peak Cockpit bright/dark/exposure checks and records the chosen exposure/frame rate. Runs once per session. |
+| `capture_camera_references` | Re-confirms illumination is on, captures/verifies the `BrightReference_0_0.bmp` / `DarkReference_0_90.bmp` images, selects the bright/dark ROI, and checks bright > dark with no saturation. Runs once **per sample**. |
+| `check_disk_space` | Prints estimated-vs-free image space for one sample's state count; run once per sample, since earlier samples in the same session consume space too. |
+| `write_error_traceback` | Saves the current exception's full traceback to `Logs/error_traceback.txt` (in the CURRENT sample's folder). |
+| `ask_camera_settings` (nested) | The `ask_settings` callback passed to `camera.initialize()`; re-prompts for exposure/frame rate when the camera rejects them. |
+| `run_resumed_session` | Recovers exactly the one `--resume`d sample; no multi-sample loop. Structurally the old single-sample flow. |
+| `run_fresh_session` | The multi-sample session: mode → environment → hardware bring-up once, then loops asking metadata → angles → disk check → reference capture → measurement → rehome → "another sample?" per sample. Owns its own `SessionTranscript` lifecycle (a new transcript per sample folder) and only disconnects the camera/motors for real when the operator is done with all samples. Returns the process exit code. |
+| `main` | Entry point: dispatches to `run_resumed_session` (`--resume`) or creates a "pending" placeholder folder and calls `run_fresh_session`. |
 
 ### `config.py` — settings and data models (not run directly)
 
 | Item | What it does |
 |---|---|
-| `PROJECT_ROOT`, `DATA_ROOT` | Anchor paths; `DATA_ROOT` is where `Data/YYYY-MM-DD_RunXX` folders are created. |
+| `PROJECT_ROOT`, `DATA_ROOT` | Anchor paths; `DATA_ROOT` is where `Data/YYYY-MM-DD_<sample name>` folders are created. |
 | `MOTOR_SN`, `ZERO_OFFSET`, `KINESIS_DIR`, `REQUIRED_KINESIS_DLLS`, `MOTOR_SETTINGS_NAME` | Hardware identity/calibration constants — see "Settings that need to change" above. |
 | `CameraSettings` | Dataclass of requested + applied camera values (exposure, frame rate, gain, retry/timeout, warning thresholds). |
 | `TimingSettings` | Dataclass of every delay, retry count, and position tolerance used around motor/camera operations. |
@@ -441,7 +498,9 @@ zero, new lab PC, etc.).
 | `optical_to_motor` | Core calibration formula: `motor = (optical + zero_offset) % 360`. |
 | `format_angle` | Turns an angle into a clean, filesystem-safe label for filenames. |
 | `parse_angle_spec` | Parses `"360/step"` or `"a,b,c"` angle text into a validated, duplicate-free list. |
-| `create_run_directory` | Creates the next `Data/YYYY-MM-DD_RunXX` folder tree with its seven subfolders. |
+| `sanitize_folder_name` | Makes a sample name safe as a Windows/POSIX folder-name component. |
+| `create_run_directory` | Creates a fresh `Data/YYYY-MM-DD_<name>` folder tree (collision-avoided) with its seven subfolders. |
+| `rename_run_directory` | Renames an existing run folder to `Data/YYYY-MM-DD_<name>` in place — used once, for the first sample of a session, after a "pending" placeholder is created. |
 | `write_json` | Atomic JSON write (write to `.tmp`, then rename) so crashes can't leave a half-written file. |
 | `check_environment` | Import/filesystem-only diagnostic checks (Python version, packages, Kinesis DLLs, disk space). |
 | `estimate_disk_bytes` | Conservative BMP size estimate used for the pre-run disk-space check. |
@@ -514,6 +573,7 @@ zero, new lab PC, etc.).
 |---|---|
 | `move_to_calibration_zero` | Moves one motor to a candidate optical-zero angle so the operator can visually confirm it, before hand-copying the value into `config.ZERO_OFFSET`. |
 | `verification_scan` | Sweeps a motor across a list of optical angles and records commanded-vs-encoder pairs, to check calibration accuracy across the full range. |
+| `verify_with_reference_sample` | Moves the motorized `SAMPLE` stage (a known reference optic, e.g. a linear polarizer at a documented angle — not a normal experiment's specimen) to a target optical angle, for validating a measured Mueller matrix against the reference optic's known theoretical one. |
 
 ## Before collecting research data
 

@@ -46,6 +46,10 @@ class CameraController:
         self._acquisition_started = False  # True only after AcquisitionStart succeeds
         self.last_mean_intensity: float | None = None
         self.last_image_stats: dict[str, float | int] = {}
+        # Raw pixel array from the most recent save_bmp() call — None in dry-run
+        # (no real pixels exist to select an ROI from). Used by select_roi()/
+        # roi_mean() in 01_main.capture_camera_references().
+        self.last_image_array = None
 
     @staticmethod
     def _no_devices(devices) -> bool:
@@ -181,6 +185,7 @@ class CameraController:
             command = self.node_map.FindNode("UserSetLoad")
             command.Execute()
             command.WaitUntilDone()
+            print("Camera settings reset to factory default before applying this experiment's values.")
         except Exception as exc:
             print(f"Camera default-user-set warning: {exc}")
 
@@ -307,6 +312,7 @@ class CameraController:
         if self.dry_run:
             self._write_simulated_bmp(path)
             self.last_mean_intensity = 125.0
+            self.last_image_array = None
             self.last_image_stats = {
                 "minimum": 1,
                 "maximum": 250,
@@ -318,6 +324,7 @@ class CameraController:
             return
         import cv2
 
+        self.last_image_array = image
         self.last_mean_intensity = float(image.mean())
         saturated_pixels = int((image == 255).sum())
         self.last_image_stats = {
@@ -451,6 +458,7 @@ class CameraController:
         """
 
         if self.dry_run:
+            print("Camera disconnected (dry-run).")
             return
         try:
             if self._acquisition_started:
@@ -485,6 +493,16 @@ class CameraController:
                     self.ids_peak.Library.Close()
                 except Exception as exc:
                     print(f"IDS Peak library close warning: {exc}")
+            # Clear references so nothing in this object still looks "open" —
+            # ids_peak.Library.Close() already released the device/data stream
+            # at the SDK level (the same release mechanism discover() uses so
+            # Cockpit can open the camera without a device-busy conflict); this
+            # just makes that fact visible in the object's own state too.
+            self._buffers = []
+            self.data_stream = None
+            self.node_map = None
+            self.device = None
+        print("Camera fully released — safe to open in Cockpit or reconnect for the next session.")
 
     def emergency_stop(self) -> None:
         """Best-effort immediate acquisition stop for the SIGINT path.
@@ -501,3 +519,47 @@ class CameraController:
             self.data_stream.StopAcquisition(self.ids_peak.AcquisitionStopMode_Default)
         except Exception as exc:
             print(f"Camera emergency-stop warning: {exc}")
+
+
+def select_roi(image, window_size: int, stride: int, min_mean: float) -> tuple[int, int, int, int]:
+    """Find the flattest sufficiently-bright square region in ``image``.
+
+    Slides a ``window_size`` x ``window_size`` window across the frame with
+    step ``stride``, scoring each candidate by standard deviation (lower =
+    flatter). Candidates whose mean is below ``min_mean`` (too dark) or that
+    contain any saturated (255) pixel are rejected outright — the winner is
+    the flattest region among what remains, not the brightest or the most
+    central, so a genuine flat-illuminated plateau is preferred over the
+    peak of an uneven (e.g. Gaussian) beam profile. Returns (x, y, width,
+    height). Only called on real (non-dry-run) frames — see
+    01_main.capture_camera_references().
+    """
+
+    height, width = image.shape
+    best: tuple[int, int, int, int] | None = None
+    best_std: float | None = None
+    for y in range(0, height - window_size + 1, stride):
+        for x in range(0, width - window_size + 1, stride):
+            region = image[y : y + window_size, x : x + window_size]
+            mean = float(region.mean())
+            if mean < min_mean:
+                continue
+            if int((region == 255).sum()) > 0:
+                continue
+            std = float(region.std())
+            if best_std is None or std < best_std:
+                best_std = std
+                best = (x, y, window_size, window_size)
+    if best is None:
+        raise CameraError(
+            "No region met the ROI brightness/saturation criteria; "
+            "check illumination or lower CameraSettings.roi_min_mean."
+        )
+    return best
+
+
+def roi_mean(image, roi: tuple[int, int, int, int]) -> float:
+    """Mean pixel value within ``roi`` = (x, y, width, height)."""
+
+    x, y, width, height = roi
+    return float(image[y : y + height, x : x + width].mean())

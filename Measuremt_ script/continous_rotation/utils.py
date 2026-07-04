@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sys
 from datetime import date
@@ -38,22 +39,63 @@ def parse_ratio(text: str) -> tuple[int, int]:
     return slow, fast
 
 
-def create_run_directory(root: Path = DATA_ROOT) -> Path:
-    """Create the next collision-free YYYY-MM-DD_RunXX directory tree.
+_RUN_SUBFOLDERS = ("Images", "Logs", "Config", "Reports", "Checkpoints", "Results")
 
-    Same seven standard subfolders as discreate_angle for consistency, even
-    though continuous mode's engine does not populate all of them yet.
+
+def sanitize_folder_name(name: str) -> str:
+    """Make ``name`` safe as a single Windows/POSIX path component.
+
+    Deliberate duplicate of discreate_angle/utils.py's sanitize_folder_name().
+    """
+
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip().rstrip(". ")
+    return cleaned or "sample"
+
+
+def _next_available(path: Path) -> Path:
+    """Return ``path`` if it doesn't exist yet, else the first
+    "<path>_02", "<path>_03", ... that doesn't."""
+
+    if not path.exists():
+        return path
+    counter = 2
+    while True:
+        candidate = path.with_name(f"{path.name}_{counter:02d}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def create_run_directory(root: Path, name: str) -> Path:
+    """Create a fresh, collision-free "YYYY-MM-DD_<name>" directory tree.
+
+    ``name`` is normally the sample name (see 01_main.run_fresh_session()).
+    Results holds the bright/dark reference BMPs; continuous mode's engine
+    does not populate the others (Images, DarkFrames) yet.
     """
 
     root.mkdir(parents=True, exist_ok=True)
     prefix = date.today().isoformat()
-    existing = [p for p in root.glob(f"{prefix}_Run*") if p.is_dir()]
-    used = {int(p.name.rsplit("Run", 1)[1]) for p in existing if p.name.rsplit("Run", 1)[1].isdigit()}
-    run_number = next(number for number in range(1, 10_000) if number not in used)
-    run = root / f"{prefix}_Run{run_number:02d}"
-    for child in ("Images", "Logs", "Config", "Reports", "Checkpoints"):
+    run = _next_available(root / f"{prefix}_{sanitize_folder_name(name)}")
+    for child in _RUN_SUBFOLDERS:
         (run / child).mkdir(parents=True, exist_ok=False)
     return run
+
+
+def rename_run_directory(run: Path, name: str) -> Path:
+    """Rename an existing run directory in place to "YYYY-MM-DD_<name>".
+
+    The caller MUST stop the transcript (closing its log file) before
+    calling this — Windows/NTFS refuses to rename a directory while a file
+    inside it is still open, even by the same process — and start a new one
+    immediately after; see 01_main.run_fresh_session().
+    """
+
+    prefix = date.today().isoformat()
+    target = _next_available(run.parent / f"{prefix}_{sanitize_folder_name(name)}")
+    if target != run:
+        run.rename(target)
+    return target
 
 
 def write_json(path: Path, payload: object) -> None:
