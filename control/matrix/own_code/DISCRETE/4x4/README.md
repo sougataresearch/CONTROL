@@ -12,7 +12,11 @@ placeholder -- point it at your first real 4x4 run once you have one.
 
 Naming your run folders correctly matters more than anything in this
 README -- see `../../NAMING.md` for the one rule, and for repeat rounds of
-the same sample see `average_rounds.py` in this folder.
+the same sample see `average_rounds.py` in this folder. **Recommended
+default: capture >= 3 rounds and use `average_rounds.py`** rather than
+`main.py` alone -- a single round only gives you a point estimate with no
+idea how much it would vary on a recapture (`main.py` will print a reminder
+of this if it doesn't see a `_round<NN>` suffix on the run folder).
 
 This folder is fully self-contained: it does not import or depend on
 anything in `own_code/3x3`, `matrix/tinghuye/`,
@@ -224,9 +228,21 @@ instead of an exact solve. That's also *why* more images improve precision
 whereas the exact-16-image case has no such averaging.
 
 `condition_number` (in `summary.txt`) is a sanity check on `H` itself: a
-well-conditioned QWP angle set (e.g. evenly spaced angles) gives a low
-number; if it's very large, the chosen angles don't distinguish the matrix
-elements well and the fit will amplify noise.
+well-conditioned QWP angle set gives a low number; if it's very large (or
+`pinv` effectively can't find a unique solution at all), the chosen angles
+don't distinguish the matrix elements well and the fit will amplify noise.
+
+**Angles evenly spaced by 45 degrees are a specific trap, not a safe
+default.** `test_reconstruction.py` in this folder found that a 16-image
+grid at `[0, 45, 90, 135]` is rank-deficient (rank 9 of 16, condition number
+~1e18) for this fixed-polarizer + rotating-QWP model -- the QWP's Mueller
+terms only depend on `cos(2*theta)`/`sin(2*theta)`, and samples spaced 90
+degrees apart in that doubled angle alias each other, losing rank entirely
+regardless of image count or noise. `[0, 30, 60, 90]` (rank 16, condition
+number ~640) or `[0, 22.5, 45, 67.5]` (condition number ~490) are both fine.
+When planning a QWP angle grid, avoid 45-degree-multiple spacing; check
+`condition_number` after any real capture with a new grid rather than
+assuming "evenly spaced" is automatically well-conditioned.
 
 `residual_rms` measures, per pixel, how well the fitted matrix actually
 reproduces the N measured intensities -- large residuals flag pixels (or

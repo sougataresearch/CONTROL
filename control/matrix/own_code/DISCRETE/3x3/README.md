@@ -7,7 +7,11 @@ count or hardcodes what the sample is.
 
 Naming your run folders correctly matters more than anything in this
 README -- see `../../NAMING.md` for the one rule, and for repeat rounds of
-the same sample see `average_rounds.py` in this folder.
+the same sample see `average_rounds.py` in this folder. **Recommended
+default: capture >= 3 rounds and use `average_rounds.py`** rather than
+`main.py` alone -- a single round only gives you a point estimate with no
+idea how much it would vary on a recapture (`main.py` will print a reminder
+of this if it doesn't see a `_round<NN>` suffix on the run folder).
 
 This folder is fully self-contained: it does not import or depend on
 anything in `own_code/4x4`, `matrix/tinghuye/`,

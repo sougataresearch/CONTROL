@@ -63,8 +63,10 @@ def _ensure_dependencies() -> None:
 _ensure_dependencies()
 
 import argparse
+import csv
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -104,6 +106,24 @@ def _save_last_calibration(values: dict) -> None:
     _CALIBRATION_STATE_PATH.write_text(json.dumps(values, indent=2), encoding="utf-8")
 
 
+# Full history of every calibration value ever used, one row per run -- unlike
+# .last_calibration.json above (which only remembers the single most recent
+# value, for the next prompt's suggested default), this lets you look back and
+# answer "what extinction ratio/retardance was in effect for a specific past
+# capture?" Local to this machine -- not committed to git.
+_CALIBRATION_LOG_PATH = Path(__file__).resolve().parent / ".calibration_log.csv"
+
+
+def _append_calibration_log(run_dir: Path, extinction_ratio: float, retardance_deg: float) -> None:
+    is_new = not _CALIBRATION_LOG_PATH.exists()
+    with open(_CALIBRATION_LOG_PATH, "a", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        if is_new:
+            writer.writerow(["timestamp", "run_directory", "extinction_ratio", "retardance_deg"])
+        writer.writerow([datetime.now().isoformat(timespec="seconds"), run_dir,
+                          extinction_ratio, retardance_deg])
+
+
 _DATE_DIR_RE = re.compile(r"^\d{8}$")
 
 
@@ -125,6 +145,21 @@ def default_output_directory(run_dir: Path) -> Path:
     return Path(__file__).resolve().parent / "Results" / _date_relative_path(run_dir)
 
 
+def _git_commit_hash() -> str:
+    """Short git commit hash of the code that produced this result, so a
+    result can always be traced back to the exact code version -- Results/
+    isn't git-tracked itself, so without this there's no other link between
+    an output and the code state that generated it. Falls back gracefully
+    if git isn't available or this isn't a git checkout."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent, stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "unversioned"
+
+
 def ask_float(prompt: str, default: float) -> float:
     """Ask for a numeric value, showing ``default`` in brackets; press Enter
     (blank input) to accept it as-is. Loops until a parseable number is
@@ -143,7 +178,8 @@ def ask_float(prompt: str, default: float) -> float:
             print("Enter a numeric value.")
 
 
-def save_outputs(result: MuellerResult4x4, out_dir: Path) -> None:
+def save_outputs(result: MuellerResult4x4, out_dir: Path, run_dir: Path,
+                  extinction_ratio: float, retardance_deg: float) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     np.save(out_dir / "mueller_matrix_normalized.npy", result.matrix)
@@ -157,7 +193,13 @@ def save_outputs(result: MuellerResult4x4, out_dir: Path) -> None:
         fh.write(f"Mean fit residual (RMS): {result.residual_rms.mean():.6f}\n")
         fh.write("Mean Mueller matrix (spatial average, normalized by m00):\n")
         fh.write(np.array2string(result.matrix_mean))
-        fh.write("\n")
+        fh.write("\n\n")
+        fh.write("--- Provenance ---\n")
+        fh.write(f"Generated: {datetime.now().isoformat(timespec='seconds')}\n")
+        fh.write(f"Git commit: {_git_commit_hash()}\n")
+        fh.write(f"Source run: {run_dir}\n")
+        fh.write(f"Extinction ratio: {extinction_ratio}\n")
+        fh.write(f"Retardance (deg): {retardance_deg}\n")
 
     fig, axes = plt.subplots(4, 4, figsize=(12, 12))
     im = None
@@ -209,10 +251,11 @@ def main() -> None:
         "QWP retardance in degrees", last_calibration.get("retardance_deg", 90.0)
     )
     _save_last_calibration({"extinction_ratio": extinction_ratio, "retardance_deg": retardance_deg})
+    _append_calibration_log(run_dir, extinction_ratio, retardance_deg)
 
     run = load_run(run_dir)
     result = reconstruct(run, extinction_ratio=extinction_ratio, retardance_deg=retardance_deg)
-    save_outputs(result, out_dir)
+    save_outputs(result, out_dir, run_dir, extinction_ratio, retardance_deg)
 
     np.set_printoptions(precision=4, suppress=True)
     print(f"Mode: 4x4 continuous, frames used: {len(run.files)}")

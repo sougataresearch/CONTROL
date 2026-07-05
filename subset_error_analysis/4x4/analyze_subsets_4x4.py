@@ -66,6 +66,7 @@ _ensure_dependencies()
 import itertools
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -277,8 +278,24 @@ def _format_matrix(m: np.ndarray) -> str:
     return "\n".join("    [" + ", ".join(f"{v:+.4f}" for v in row) + "]" for row in m)
 
 
+def _git_commit_hash() -> str:
+    """Short git commit hash of the code that produced this result, so a
+    result can always be traced back to the exact code version -- Results/
+    isn't git-tracked itself, so without this there's no other link between
+    an output and the code state that generated it. Falls back gracefully
+    if git isn't available or this isn't a git checkout."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent, stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "unversioned"
+
+
 def _write_matrices(out_dir: Path, sample_name: str, run_dir: Path, theory: np.ndarray,
-                     total_images: int, full_matrix: np.ndarray, rows: list) -> None:
+                     total_images: int, full_matrix: np.ndarray, rows: list,
+                     extinction_ratio: float, retardance_deg: float) -> None:
     lines = []
     lines.append(f"Sample: {sample_name}")
     lines.append(f"Source: {run_dir}")
@@ -308,6 +325,13 @@ def _write_matrices(out_dir: Path, sample_name: str, run_dir: Path, theory: np.n
             "difference_from_theory": diff.tolist(),
         })
 
+    lines.append("")
+    lines.append("--- Provenance ---")
+    lines.append(f"Generated: {datetime.now().isoformat(timespec='seconds')}")
+    lines.append(f"Git commit: {_git_commit_hash()}")
+    lines.append(f"Extinction ratio: {extinction_ratio}")
+    lines.append(f"Retardance (deg): {retardance_deg}")
+
     (out_dir / "matrices.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     payload = {
@@ -320,6 +344,12 @@ def _write_matrices(out_dir: Path, sample_name: str, run_dir: Path, theory: np.n
             "difference_from_theory": (full_matrix - theory).tolist(),
         },
         "subsets": json_rows,
+        "provenance": {
+            "generated": datetime.now().isoformat(timespec="seconds"),
+            "git_commit": _git_commit_hash(),
+            "extinction_ratio": extinction_ratio,
+            "retardance_deg": retardance_deg,
+        },
     }
     (out_dir / "matrices.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -376,7 +406,8 @@ def analyze_run(run_dir: Path) -> dict | None:
     print(f"Unique QWP angles: {unique_angles} ({total_images} images total)")
     print(f"Lowest-deviation subset: {rows[0][0]}" if rows else "No valid subsets found")
 
-    _write_matrices(out_dir, sample_name, run_dir, theory, total_images, full_matrix, rows)
+    _write_matrices(out_dir, sample_name, run_dir, theory, total_images, full_matrix, rows,
+                     EXTINCTION_RATIO, RETARDANCE_DEG)
 
     # One bar chart: every angle-subset combination plus the full-angle
     # capture, sorted so the lowest bar is the combination that deviates

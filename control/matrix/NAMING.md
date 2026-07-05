@@ -30,6 +30,15 @@ Data/03072026/qwp/qwp45/              Images/  Config/experiment_config.json
 - Leave the suffix off entirely for a normal, one-time capture -- don't
   write `_round01` if there's no `_round02` coming.
 
+**Recommended default: capture >= 3 rounds whenever feasible**, not just
+when you already suspect a problem. A single round gives you a point
+estimate with no idea how much it would vary if you recaptured it; `main.py`
+alone can't tell you that -- only `average_rounds.py`'s round-to-round
+standard deviation can. Time/sample availability will sometimes make a
+single round the only option, and that's fine (see "Leave the suffix off"
+above) -- but treat 3 rounds as the default you reach for, not the
+exception.
+
 ## Why this is the one rule, not several
 
 - The acquisition scripts in `Measuremt_ script/discreate_angle` already

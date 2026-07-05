@@ -53,6 +53,7 @@ def _ensure_dependencies() -> None:
 _ensure_dependencies()
 
 import re
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -100,6 +101,21 @@ def _date_relative_parent(path: Path) -> Path:
     return Path(".")
 
 
+def _git_commit_hash() -> str:
+    """Short git commit hash of the code that produced this result, so a
+    result can always be traced back to the exact code version -- Results/
+    isn't git-tracked itself, so without this there's no other link between
+    an output and the code state that generated it. Falls back gracefully
+    if git isn't available or this isn't a git checkout."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent, stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "unversioned"
+
+
 def main() -> None:
     round_dirs = [Path(p) for p in ROUND_DIRECTORIES]
     sample_name = SAMPLE_NAME or _default_sample_name(ROUND_DIRECTORIES)
@@ -138,7 +154,13 @@ def main() -> None:
         fh.write(np.array2string(mean_matrix))
         fh.write("\nStandard deviation across rounds:\n")
         fh.write(np.array2string(std_matrix))
-        fh.write("\n")
+        fh.write("\n\n")
+        fh.write("--- Provenance ---\n")
+        fh.write(f"Generated: {datetime.now().isoformat(timespec='seconds')}\n")
+        fh.write(f"Git commit: {_git_commit_hash()}\n")
+        fh.write(f"Round directories: {[str(d) for d in round_dirs]}\n")
+        fh.write(f"Extinction ratio: {EXTINCTION_RATIO}\n")
+        fh.write(f"Retardance (deg): {RETARDANCE_DEG}\n")
 
     print(f"\nMean matrix across {len(round_dirs)} rounds:")
     print(mean_matrix)

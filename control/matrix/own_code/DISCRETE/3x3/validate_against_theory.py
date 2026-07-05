@@ -58,6 +58,7 @@ def _ensure_dependencies() -> None:
 _ensure_dependencies()
 
 import re
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -168,6 +169,21 @@ def _date_relative_path(path: Path) -> Path:
     return Path(path.name)
 
 
+def _git_commit_hash() -> str:
+    """Short git commit hash of the code that produced this result, so a
+    result can always be traced back to the exact code version -- Results/
+    isn't git-tracked itself, so without this there's no other link between
+    an output and the code state that generated it. Falls back gracefully
+    if git isn't available or this isn't a git checkout."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent, stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "unversioned"
+
+
 def main() -> None:
     confirm_sample_directories(SAMPLE_DIRECTORIES)
 
@@ -223,6 +239,11 @@ def main() -> None:
         fh.write("sample      | mean-matrix Frobenius error | mean per-pixel Frobenius error\n")
         for name, mean_err, pix_err in rows:
             fh.write(f"{name:11s} | {mean_err:27.4f} | {pix_err:.4f}\n")
+        fh.write("\n--- Provenance ---\n")
+        fh.write(f"Generated: {datetime.now().isoformat(timespec='seconds')}\n")
+        fh.write(f"Git commit: {_git_commit_hash()}\n")
+        fh.write(f"Sample directories: {SAMPLE_DIRECTORIES}\n")
+        fh.write(f"Extinction ratio: {EXTINCTION_RATIO}\n")
 
     air_row = next((r for r in rows if r[0].lower() == "air"), None)
     print()

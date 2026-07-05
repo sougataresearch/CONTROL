@@ -61,8 +61,10 @@ def _ensure_dependencies() -> None:
 _ensure_dependencies()
 
 import argparse
+import csv
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -101,6 +103,23 @@ def _save_last_calibration(values: dict) -> None:
     _CALIBRATION_STATE_PATH.write_text(json.dumps(values, indent=2), encoding="utf-8")
 
 
+# Full history of every calibration value ever used, one row per run -- unlike
+# .last_calibration.json above (which only remembers the single most recent
+# value, for the next prompt's suggested default), this lets you look back and
+# answer "what extinction ratio was in effect for a specific past capture?"
+# Local to this machine -- not committed to git (see ../../../.gitignore).
+_CALIBRATION_LOG_PATH = Path(__file__).resolve().parent / ".calibration_log.csv"
+
+
+def _append_calibration_log(run_dir: Path, extinction_ratio: float) -> None:
+    is_new = not _CALIBRATION_LOG_PATH.exists()
+    with open(_CALIBRATION_LOG_PATH, "a", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        if is_new:
+            writer.writerow(["timestamp", "run_directory", "extinction_ratio"])
+        writer.writerow([datetime.now().isoformat(timespec="seconds"), run_dir, extinction_ratio])
+
+
 _DATE_DIR_RE = re.compile(r"^\d{8}$")
 
 
@@ -122,6 +141,21 @@ def default_output_directory(run_dir: Path) -> Path:
     return Path(__file__).resolve().parent / "Results" / _date_relative_path(run_dir)
 
 
+def _git_commit_hash() -> str:
+    """Short git commit hash of the code that produced this result, so a
+    result can always be traced back to the exact code version -- Results/
+    isn't git-tracked itself, so without this there's no other link between
+    an output and the code state that generated it. Falls back gracefully
+    if git isn't available or this isn't a git checkout."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent, stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "unversioned"
+
+
 def ask_float(prompt: str, default: float) -> float:
     """Ask for a numeric value, showing ``default`` in brackets; press Enter
     (blank input) to accept it as-is. Loops until a parseable number is
@@ -139,7 +173,8 @@ def ask_float(prompt: str, default: float) -> float:
             print("Enter a numeric value.")
 
 
-def save_outputs(result: MuellerResult3x3, out_dir: Path) -> None:
+def save_outputs(result: MuellerResult3x3, out_dir: Path, run_dir: Path,
+                  extinction_ratio: float) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     np.save(out_dir / "mueller_matrix_normalized.npy", result.matrix)
@@ -153,7 +188,12 @@ def save_outputs(result: MuellerResult3x3, out_dir: Path) -> None:
         fh.write(f"Mean fit residual (RMS): {result.residual_rms.mean():.6f}\n")
         fh.write("Mean Mueller matrix (spatial average, normalized by m00):\n")
         fh.write(np.array2string(result.matrix_mean))
-        fh.write("\n")
+        fh.write("\n\n")
+        fh.write("--- Provenance ---\n")
+        fh.write(f"Generated: {datetime.now().isoformat(timespec='seconds')}\n")
+        fh.write(f"Git commit: {_git_commit_hash()}\n")
+        fh.write(f"Source run: {run_dir}\n")
+        fh.write(f"Extinction ratio: {extinction_ratio}\n")
 
     fig, axes = plt.subplots(3, 3, figsize=(9, 9))
     im = None
@@ -198,10 +238,11 @@ def main() -> None:
         "Polarizer extinction ratio Imin/Imax", last_calibration.get("extinction_ratio", 0.0)
     )
     _save_last_calibration({"extinction_ratio": extinction_ratio})
+    _append_calibration_log(run_dir, extinction_ratio)
 
     run = load_run(run_dir)
     result = reconstruct(run, extinction_ratio=extinction_ratio)
-    save_outputs(result, out_dir)
+    save_outputs(result, out_dir, run_dir, extinction_ratio)
 
     np.set_printoptions(precision=4, suppress=True)
     print(f"Mode: 3x3, images used: {len(run.files)}")
@@ -210,6 +251,15 @@ def main() -> None:
     print("Mean Mueller matrix (normalized by m00):")
     print(result.matrix_mean)
     print(f"Saved outputs to {out_dir}")
+
+    if not re.search(r"_round\d+$", run_dir.name, re.IGNORECASE):
+        print(
+            "\nNote: this looks like a single-round capture, so you only have a "
+            "point estimate with no idea how much it would vary on a recapture. "
+            "Recommended default (see NAMING.md): capture >= 3 rounds "
+            "(<sample>_round01, _round02, ...) and run average_rounds.py for a "
+            "mean + standard deviation across rounds."
+        )
 
 
 if __name__ == "__main__":

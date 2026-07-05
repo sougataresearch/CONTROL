@@ -3,4 +3,5 @@ __pycache__/
 **/Data/
 **/Results/
 .last_calibration.json
+.calibration_log.csv
 .claude/settings.local.json
