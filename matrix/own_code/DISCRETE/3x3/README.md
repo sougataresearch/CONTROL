@@ -128,7 +128,10 @@ Polarizer extinction ratio Imin/Imax [0]: 0.02
 ```
 
 Type your measured value and press Enter, or just press Enter (blank) to
-accept the suggested ideal default (`0`).
+accept the suggested default shown in brackets — the ideal value (`0`) the
+first time you run this, then whatever you entered last time after that
+(remembered in `.last_calibration.json` next to `main.py`, not committed to
+git).
 
 Results are saved to `own_code/3x3/Results/<run folder name>/` by default
 (e.g. `Results/lp30/`) -- deliberately *not* inside the data folder, since

@@ -14,8 +14,10 @@ this file:
     python main.py
 
 You will be prompted in the terminal for the polarizer extinction ratio
-(press Enter to accept the suggested ideal default, 0). Pass --extinction
-on the command line instead to skip the prompt for a one-off/scripted run:
+(press Enter to accept the suggested default -- the ideal value, 0, the
+first time; whatever you last used after that, remembered in
+.last_calibration.json next to this file). Pass --extinction on the
+command line instead to skip the prompt for a one-off/scripted run:
 
     python main.py <run_directory> [--out OUTPUT_DIR] [--extinction E]
 
@@ -59,6 +61,7 @@ def _ensure_dependencies() -> None:
 _ensure_dependencies()
 
 import argparse
+import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -78,6 +81,23 @@ RUN_DIRECTORY = r"G:\control\Data\03072026\lp\lp90"
 # to this script, independent of wherever RUN_DIRECTORY actually is.
 OUTPUT_DIRECTORY = None
 # ---------------------------------------------------------------------------
+
+# Remembers the last extinction ratio you actually used (typed at the
+# prompt, or passed via --extinction), so the next run's prompt suggests
+# that instead of resetting to the ideal default every time. Local to this
+# machine -- not committed to git (see ../../../.gitignore).
+_CALIBRATION_STATE_PATH = Path(__file__).resolve().parent / ".last_calibration.json"
+
+
+def _load_last_calibration() -> dict:
+    try:
+        return json.loads(_CALIBRATION_STATE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_last_calibration(values: dict) -> None:
+    _CALIBRATION_STATE_PATH.write_text(json.dumps(values, indent=2), encoding="utf-8")
 
 
 def default_output_directory(run_dir: Path) -> Path:
@@ -155,9 +175,11 @@ def main() -> None:
 
     run_dir = Path(args.run_directory or RUN_DIRECTORY)
     out_dir = Path(args.out or OUTPUT_DIRECTORY) if (args.out or OUTPUT_DIRECTORY) else default_output_directory(run_dir)
+    last_calibration = _load_last_calibration()
     extinction_ratio = args.extinction if args.extinction is not None else ask_float(
-        "Polarizer extinction ratio Imin/Imax", 0.0
+        "Polarizer extinction ratio Imin/Imax", last_calibration.get("extinction_ratio", 0.0)
     )
+    _save_last_calibration({"extinction_ratio": extinction_ratio})
 
     run = load_run(run_dir)
     result = reconstruct(run, extinction_ratio=extinction_ratio)

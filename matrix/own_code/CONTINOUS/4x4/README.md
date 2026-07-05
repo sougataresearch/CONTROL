@@ -78,7 +78,10 @@ QWP retardance in degrees [90]: 88.5
 ```
 
 Type your measured values and press Enter, or just press Enter (blank) on
-either to accept the suggested ideal default shown in brackets.
+either to accept the suggested default shown in brackets — the ideal values
+(`0`/`90`) the first time you run this, then whatever you entered last time
+after that (remembered in `.last_calibration.json` next to `main.py`, not
+committed to git).
 
 Results are saved to `own_code/CONTINOUS/4x4/Results/<run folder name>/` by
 default — deliberately *not* inside the data folder, since `RUN_DIRECTORY`
