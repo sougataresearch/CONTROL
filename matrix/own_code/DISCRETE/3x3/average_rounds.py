@@ -20,6 +20,38 @@ To run: edit ROUND_DIRECTORIES below to list every round's folder, then:
 
 from __future__ import annotations
 
+import importlib.util
+import subprocess
+import sys
+
+_REQUIRED_PACKAGES = {
+    "numpy": "numpy",
+    "PIL": "Pillow",
+}
+
+
+def _ensure_dependencies() -> None:
+    """Install any of this script's required packages that aren't already
+    present, using the same Python interpreter running this script. Falls
+    back to --break-system-packages if a plain install is blocked by an
+    externally-managed environment (PEP 668, e.g. a uv-managed Python)."""
+
+    missing = [pip_name for module_name, pip_name in _REQUIRED_PACKAGES.items()
+               if importlib.util.find_spec(module_name) is None]
+    if not missing:
+        return
+
+    print(f"Installing missing dependencies: {', '.join(missing)}")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
+    except subprocess.CalledProcessError:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--break-system-packages", *missing]
+        )
+
+
+_ensure_dependencies()
+
 import re
 from pathlib import Path
 

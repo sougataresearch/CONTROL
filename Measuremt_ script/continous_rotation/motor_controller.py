@@ -48,6 +48,8 @@ class MotorController:
         self.devices: dict[str, object] = {}
         self._simulated_positions = {name: 0.0 for name in self.names}
         self._simulated_spinning: set[str] = set()  # dry-run only
+        self._simulated_velocities: dict[str, float] = {}  # dry-run only, deg/s, set by set_velocity()
+        self._simulated_spin_start: dict[str, tuple[float, float]] = {}  # dry-run only: name -> (monotonic time, angle at start_continuous())
         self._dll_directory = None
 
     def _load_kinesis(self) -> None:
@@ -231,6 +233,7 @@ class MotorController:
             raise MotorError(f"{name} is not connected.")
         print(f"[{name}] Velocity set: max {max_velocity_deg_s:.3f} deg/s, accel {accel_deg_s2:.3f} deg/s^2")
         if self.dry_run:
+            self._simulated_velocities[name] = max_velocity_deg_s
             return
         self.devices[name].SetVelocityParams(self.Decimal(accel_deg_s2), self.Decimal(max_velocity_deg_s))
 
@@ -253,8 +256,11 @@ class MotorController:
         """Begin continuous rotation on one QWP axis (non-blocking).
 
         Real hardware: Kinesis CageRotator.MoveContinuous(MotorDirection.Forward
-        or .Backward). Dry-run just marks the axis as spinning so
-        encoder_positions() can report a moving simulated angle.
+        or .Backward). Dry-run marks the axis as spinning and records the
+        wall-clock start time/angle, so encoder_positions() can report a
+        realistically advancing simulated angle (start angle + velocity ×
+        elapsed time) instead of a frozen one — set_velocity() must be
+        called first so a velocity is on record to advance at.
         """
 
         if name not in self.devices:
@@ -262,6 +268,7 @@ class MotorController:
         print(f"[{name}] Starting continuous rotation ({'forward' if forward else 'backward'}).")
         if self.dry_run:
             self._simulated_spinning.add(name)
+            self._simulated_spin_start[name] = (time.monotonic(), self._simulated_positions[name])
             return
         direction = self.MotorDirection.Forward if forward else self.MotorDirection.Backward
         self.devices[name].MoveContinuous(direction)
@@ -273,15 +280,30 @@ class MotorController:
             raise MotorError(f"{name} is not connected.")
         print(f"[{name}] Stopping continuous rotation...")
         if self.dry_run:
+            if name in self._simulated_spinning:
+                self._simulated_positions[name] = self._dry_run_spinning_angle(name)
             self._simulated_spinning.discard(name)
+            self._simulated_spin_start.pop(name, None)
             return
         self.devices[name].Stop(self.timing.motor_timeout_ms)
+
+    def _dry_run_spinning_angle(self, name: str) -> float:
+        """Current simulated angle for a spinning axis: start angle plus
+        velocity × elapsed wall-clock time, wrapped to 0-360."""
+
+        start_time, start_angle = self._simulated_spin_start[name]
+        velocity = self._simulated_velocities.get(name, 0.0)
+        elapsed = time.monotonic() - start_time
+        return (start_angle + velocity * elapsed) % 360.0
 
     def encoder_positions(self) -> dict[str, float]:
         """Read back the current reported position of every connected motor."""
 
         positions: dict[str, float] = {}
         for name, device in self.devices.items():
+            if self.dry_run and name in self._simulated_spinning:
+                positions[name] = self._dry_run_spinning_angle(name)
+                continue
             positions[name] = (
                 self._simulated_positions[name] if self.dry_run else float(str(device.Position))
             )

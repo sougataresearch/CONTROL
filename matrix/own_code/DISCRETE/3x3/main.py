@@ -1,5 +1,5 @@
-"""Single entry point for the 4x4 Mueller matrix pipeline: load a run's
-images, reconstruct its 4x4 Mueller matrix, and save every output
+"""Single entry point for the 3x3 Mueller matrix pipeline: load a run's
+images, reconstruct its 3x3 Mueller matrix, and save every output
 (per-element maps, an overview plot, the mean matrix, and fit diagnostics)
 to disk.
 
@@ -7,7 +7,7 @@ This is the only file you need to run. It imports image_loader.py and
 solve_mueller.py from this same folder -- see README.md (in this folder)
 for what each one does and the physics behind them.
 
-To run: edit RUN_DIRECTORY below to point at whatever 4x4 run you want to
+To run: edit RUN_DIRECTORY below to point at whatever 3x3 run you want to
 process (it does not need to live under this project at all), then just run
 this file -- no arguments required.
 
@@ -16,10 +16,43 @@ this file -- no arguments required.
 CLI arguments still work too, and override RUN_DIRECTORY/OUTPUT_DIRECTORY
 for a one-off run without editing the file:
 
-    python main.py <run_directory> [--out OUTPUT_DIR] [--extinction E] [--retardance R]
+    python main.py <run_directory> [--out OUTPUT_DIR] [--extinction E]
 """
 
 from __future__ import annotations
+
+import importlib.util
+import subprocess
+import sys
+
+_REQUIRED_PACKAGES = {
+    "numpy": "numpy",
+    "matplotlib": "matplotlib",
+    "PIL": "Pillow",
+}
+
+
+def _ensure_dependencies() -> None:
+    """Install any of this script's required packages that aren't already
+    present, using the same Python interpreter running this script. Falls
+    back to --break-system-packages if a plain install is blocked by an
+    externally-managed environment (PEP 668, e.g. a uv-managed Python)."""
+
+    missing = [pip_name for module_name, pip_name in _REQUIRED_PACKAGES.items()
+               if importlib.util.find_spec(module_name) is None]
+    if not missing:
+        return
+
+    print(f"Installing missing dependencies: {', '.join(missing)}")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
+    except subprocess.CalledProcessError:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--break-system-packages", *missing]
+        )
+
+
+_ensure_dependencies()
 
 import argparse
 from pathlib import Path
@@ -28,15 +61,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from image_loader import load_run
-from solve_mueller import MuellerResult4x4, reconstruct
+from solve_mueller import MuellerResult3x3, reconstruct
 
 # ---------------------------------------------------------------------------
-# EDIT THIS to point at the 4x4 run you want to process. Any folder that
-# contains Images/ and Config/experiment_config.json (mode "4x4", with
-# fixed_angles for PSG_Polarizer/PSA_Analyzer) works -- it does not need to
-# be inside this project or on the same drive.
+# EDIT THIS to point at the 3x3 run you want to process. Any folder that
+# contains Images/ and Config/experiment_config.json (mode "3x3") works --
+# it does not need to be inside this project or on the same drive.
 # ---------------------------------------------------------------------------
-RUN_DIRECTORY = r"G:\control\Data\03072026\qwp\qwp90"
+RUN_DIRECTORY = r"G:\control\Data\03072026\lp\lp90"
 
 # Where results are saved. None = a Results/<run folder name> subfolder next
 # to this script, independent of wherever RUN_DIRECTORY actually is.
@@ -48,7 +80,7 @@ def default_output_directory(run_dir: Path) -> Path:
     return Path(__file__).resolve().parent / "Results" / run_dir.name
 
 
-def save_outputs(result: MuellerResult4x4, out_dir: Path) -> None:
+def save_outputs(result: MuellerResult3x3, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     np.save(out_dir / "mueller_matrix_normalized.npy", result.matrix)
@@ -57,17 +89,17 @@ def save_outputs(result: MuellerResult4x4, out_dir: Path) -> None:
 
     np.set_printoptions(precision=4, suppress=True)
     with open(out_dir / "summary.txt", "w", encoding="utf-8") as fh:
-        fh.write("Mode: 4x4\n")
+        fh.write("Mode: 3x3\n")
         fh.write(f"System matrix condition number: {result.condition_number:.3f}\n")
         fh.write(f"Mean fit residual (RMS): {result.residual_rms.mean():.6f}\n")
         fh.write("Mean Mueller matrix (spatial average, normalized by m00):\n")
         fh.write(np.array2string(result.matrix_mean))
         fh.write("\n")
 
-    fig, axes = plt.subplots(4, 4, figsize=(12, 12))
+    fig, axes = plt.subplots(3, 3, figsize=(9, 9))
     im = None
-    for i in range(4):
-        for j in range(4):
+    for i in range(3):
+        for j in range(3):
             ax = axes[i, j]
             im = ax.imshow(result.matrix[:, :, i, j], cmap="RdBu_r", vmin=-1, vmax=1)
             ax.set_xticks([])
@@ -76,7 +108,7 @@ def save_outputs(result: MuellerResult4x4, out_dir: Path) -> None:
     fig.subplots_adjust(right=0.88)
     cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
     fig.colorbar(im, cax=cbar_ax)
-    fig.suptitle("Recovered 4x4 Mueller matrix (per pixel, normalized)")
+    fig.suptitle("Recovered 3x3 Mueller matrix (per pixel, normalized)")
     fig.savefig(out_dir / "mueller_matrix_overview.png", dpi=200)
     plt.close(fig)
 
@@ -97,20 +129,17 @@ def main() -> None:
                          help="Output folder (default: OUTPUT_DIRECTORY set at the top of this file)")
     parser.add_argument("--extinction", type=float, default=0.0,
                          help="Polarizer extinction ratio Imin/Imax (default: ideal, 0)")
-    parser.add_argument("--retardance", type=float, default=90.0,
-                         help="QWP retardance in degrees (default: ideal, 90)")
     args = parser.parse_args()
 
     run_dir = Path(args.run_directory or RUN_DIRECTORY)
     out_dir = Path(args.out or OUTPUT_DIRECTORY) if (args.out or OUTPUT_DIRECTORY) else default_output_directory(run_dir)
 
     run = load_run(run_dir)
-    result = reconstruct(run, extinction_ratio=args.extinction, retardance_deg=args.retardance)
+    result = reconstruct(run, extinction_ratio=args.extinction)
     save_outputs(result, out_dir)
 
     np.set_printoptions(precision=4, suppress=True)
-    print(f"Mode: 4x4, images used: {len(run.files)}")
-    print(f"Fixed angles: {run.fixed_angles}")
+    print(f"Mode: 3x3, images used: {len(run.files)}")
     print(f"System matrix condition number: {result.condition_number:.3f}")
     print(f"Mean fit residual (RMS): {result.residual_rms.mean():.6f}")
     print("Mean Mueller matrix (normalized by m00):")

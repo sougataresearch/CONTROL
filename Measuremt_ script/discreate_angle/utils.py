@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from datetime import date
 from pathlib import Path
 from typing import Iterable
@@ -160,11 +161,26 @@ def write_json(path: Path, payload: object) -> None:
     what makes checkpoint.json and experiment_config.json safe to read even
     if power is lost or Ctrl-C lands mid-write — the reader always sees
     either the old complete file or the new complete file, never a partial one.
+
+    Retries os.replace() a few times on WindowsError/PermissionError: rapid
+    repeated writes to the same path (e.g. a checkpoint updated many times a
+    second) occasionally race a transient antivirus/indexing lock on the
+    freshly-written .tmp file on Windows — observed in testing at a fast
+    simulated continuous-rotation capture rate. The retry is a no-op cost on
+    the far more common case where nothing else is touching the file.
     """
 
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(temporary, path)
+    last_error: OSError | None = None
+    for attempt in range(3):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.05 * (attempt + 1))
+    raise last_error
 
 
 def check_environment(output_root: Path = DATA_ROOT) -> list[tuple[str, bool, str]]:

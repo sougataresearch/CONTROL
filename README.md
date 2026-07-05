@@ -17,21 +17,24 @@ control/
 └── matrix/                    ← offline Mueller matrix reconstruction from saved images
     ├── NAMING.md               ← the one folder-naming rule, used by every capture
     ├── own_code/
-    │   ├── 3x3/                ← reconstructs a 3x3 Mueller matrix from N images (any sample)
-    │   └── 4x4/                ← reconstructs a full 4x4 Mueller matrix from N images (any sample)
+    │   ├── DISCRETE/
+    │   │   ├── 3x3/            ← reconstructs a 3x3 Mueller matrix from discrete-angle images
+    │   │   └── 4x4/            ← reconstructs a full 4x4 Mueller matrix from discrete-angle images
+    │   └── CONTINOUS/
+    │       └── 4x4/            ← reconstructs a full 4x4 Mueller matrix from a continuous-rotation run
     ├── tinghuye/                ← earlier from-scratch reconstruction scripts, kept for reference
     └── Mueller_calculation_36_images_method.py  ← reference-paper's canonical 36-image method
 ```
 
 **The whole project, end to end:** capture images with an acquisition
-folder under `Measuremt_ script/` → copy that run's `Images/` and
-`Config/experiment_config.json` into a sample-labeled folder following
-`matrix/NAMING.md` → run the matching pipeline in `matrix/own_code/3x3/` or
-`matrix/own_code/4x4/` to get a reconstructed Mueller matrix. Each of those
-three destinations has its own README with a "physics background, from
-zero" section — together they explain, from no prior assumed knowledge,
-what a Stokes vector and a Mueller matrix are, why the rig rotates the
-motors it does, and exactly how the images turn into a matrix.
+folder under `Measuremt_ script/` → copy that run's images and config into a
+sample-labeled folder following `matrix/NAMING.md` → run the matching
+pipeline under `matrix/own_code/DISCRETE/` or `matrix/own_code/CONTINOUS/`
+to get a reconstructed Mueller matrix. Each destination has its own README
+with a "physics background, from zero" section — together they explain,
+from no prior assumed knowledge, what a Stokes vector and a Mueller matrix
+are, why the rig rotates the motors it does, and exactly how the images
+turn into a matrix.
 
 The two acquisition folders under `Measuremt_ script/` are **deliberately
 independent** — neither imports from the other, and neither shares a `Data/`
@@ -66,14 +69,15 @@ deliberately not built), where both QWPs spin continuously at a fixed
 revolution ratio (classically 1:5 for a dual-rotating-retarder polarimeter
 — see that folder's README) instead of stepping through discrete angles.
 Structurally mirrors `discreate_angle/`'s session/multi-sample/disconnect
-behavior described above. Hardware bring-up, camera setup, per-sample
-bright/dark reference + ROI, and plan/config persistence are implemented
-and runnable today (including dry-run); the acquisition loop itself
-(`continuous_engine.py`) is an intentional `NotImplementedError` stub until
-the frame-rate-free-run vs. angle-triggered capture decision is made — see
-that module's docstring for the two options. Hitting that stub ends the
-whole session immediately rather than offering "another sample?", since
-the same error would recur for every sample.
+behavior described above. The acquisition loop (`continuous_engine.py`)
+captures with **angle-triggered** timing: the camera fires every time
+`PSG_QWP` crosses a configured angular step
+(`TimingSettings.capture_angle_step_deg`, default 1°, i.e. 360 frames per
+revolution), logging each frame's *actual* polled `PSG_QWP`/`PSA_QWP`
+angle — not the nominal threshold — to `Logs/experiment_log.csv`. This was
+chosen over frame-rate free-run because the reconstruction side needs
+images at known angles regardless of real hardware's velocity ripple; see
+that module's docstring for the full reasoning.
 
 ### `Measuremt_ script/MMIE_Control/`
 
@@ -92,7 +96,7 @@ modifies, anything under `Measuremt_ script/`.
   repeat round, and why). Read this first if you're not sure where a run's
   images should live.
 
-- **`own_code/3x3/`** — reconstructs a sample's 3×3 Mueller matrix
+- **`own_code/DISCRETE/3x3/`** — reconstructs a sample's 3×3 Mueller matrix
   (linear-polarization sub-block only) from however many PSG/PSA-angle
   images a run actually has, using the real rotation physics of a rotated
   polarizer rather than a fixed-image-count shortcut. Works on any sample —
@@ -103,17 +107,30 @@ modifies, anything under `Measuremt_ script/`.
   physics primer (assuming no prior polarimetry background) and a
   function-by-function walkthrough.
 
-- **`own_code/4x4/`** — the full 4×4 counterpart: same architecture, same
+- **`own_code/DISCRETE/4x4/`** — the full 4×4 counterpart for
+  `discreate_angle/`'s discrete-angle acquisition: same architecture, same
   usage pattern (`main.py` / `average_rounds.py`), but models the rig's
   fixed-polarizer + rotating-QWP generator/analyzer instead, so it can also
   recover the circular-polarization-coupled entries a 3×3 measurement
-  cannot see. No 4×4 dataset has been captured yet as of this writing —
-  `RUN_DIRECTORY` in its `main.py` is a placeholder.
+  cannot see.
 
-  `own_code/3x3/` and `own_code/4x4/` are deliberately independent — no
-  shared files, each with its own complete copy of the rotation physics,
-  its own image loader (which refuses to run on the other mode's data with
-  a clear error), and its own README.
+  `own_code/DISCRETE/3x3/` and `own_code/DISCRETE/4x4/` are deliberately
+  independent — no shared files, each with its own complete copy of the
+  rotation physics, its own image loader (which refuses to run on the other
+  mode's data with a clear error), and its own README.
+
+- **`own_code/CONTINOUS/4x4/`** — the 4×4 counterpart for
+  `continous_rotation/`'s continuous-rotation acquisition (4×4 only — see
+  above). Same physics as `DISCRETE/4x4/` (a verbatim copy of
+  `mueller_forward_model.py`) and the same generalized least-squares
+  reconstruction, since that fit already handles "however many
+  (angle, intensity) samples a run has" with no assumption about a discrete
+  grid — a continuous sweep's 360 non-grid samples need no separate
+  Fourier/harmonic-analysis step. The one real difference is
+  `image_loader.py`: it reads each frame's actual polled angle from
+  `Logs/experiment_log.csv` (skipping any frame logged `FAILED`, or a
+  `SUCCESS` row with no matching image file) rather than parsing it from
+  the filename. See its `README.md` for the full comparison.
 
 - **`tinghuye/`** — earlier from-scratch reconstruction scripts (3×3 and
   4×4, built from a fixed small angle set, plus a theory-vs-experiment
@@ -156,12 +173,19 @@ after any hardware change.
    hardware-independent logic — run `python -m unittest test_pure_functions
    -v` from inside it. A few ROI-selection tests need NumPy and are skipped
    without it (dry-run never exercises that code either).
-6. Once you have captured images, copy that run's `Images/` folder and
-   `Config/experiment_config.json` into a sample-labeled folder following
-   `matrix/NAMING.md`, then run `matrix/own_code/3x3/main.py` or
-   `matrix/own_code/4x4/main.py` (matching the mode you captured) to get a
-   reconstructed Mueller matrix. New to the physics behind any of this?
-   Start with the "Physics background, from zero" section in
+6. Once you have captured data, run the matching reconstruction pipeline to
+   get a Mueller matrix:
+   - Discrete 3×3/4×4: copy that run's `Images/` folder and
+     `Config/experiment_config.json` into a sample-labeled folder following
+     `matrix/NAMING.md`, then run `matrix/own_code/DISCRETE/3x3/main.py` or
+     `matrix/own_code/DISCRETE/4x4/main.py` (matching the mode you captured).
+   - Continuous 4×4: point `matrix/own_code/CONTINOUS/4x4/main.py`'s
+     `RUN_DIRECTORY` at the run folder directly (it reads `Images/`,
+     `Logs/experiment_log.csv`, and `Config/experiment_config.json` from
+     wherever that folder is — no renaming/copying step required).
+
+   New to the physics behind any of this? Start with the "Physics
+   background, from zero" section in
    `Measuremt_ script/discreate_angle/README.md` or
-   `matrix/own_code/3x3/README.md` — either builds the same ideas up from
-   no prior assumed knowledge.
+   `matrix/own_code/DISCRETE/3x3/README.md` — either builds the same ideas
+   up from no prior assumed knowledge.

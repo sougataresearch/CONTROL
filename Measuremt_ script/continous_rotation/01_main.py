@@ -146,6 +146,12 @@ def initialize_motors(motors: MotorController, timing: TimingSettings) -> None:
         "Rotation acceleration for all active motors (deg/s^2)", timing.rotation_accel_deg_s2
     )
     motors.set_all_velocity(velocity, accel)
+    # Persist the operator's answer back into timing so continuous_engine.py
+    # later re-sets PSA_QWP's spin velocity from the SAME base rate the
+    # operator just chose here, rather than silently falling back to
+    # whatever config.py's default still says.
+    timing.base_angular_velocity_deg_s = velocity
+    timing.rotation_accel_deg_s2 = accel
     confirm_stage("Velocity set. Home active motors?")
     motors.home_all()
     confirm_stage("Homing complete. Move to configured optical zero offsets?")

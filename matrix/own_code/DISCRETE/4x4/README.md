@@ -239,4 +239,19 @@ and the filenames in `Images/`.
 
 ## Requirements
 
-`numpy`, `matplotlib`, `Pillow` (PIL).
+`numpy`, `matplotlib`, `Pillow` (PIL) -- `main.py` and `average_rounds.py`
+each check for these on startup and `pip install` whichever are missing
+into the same Python interpreter that's running the script, before doing
+anything else. If `pip` itself isn't available in that interpreter (e.g. a
+minimal/embedded Python), you'll still need to point at one that has it --
+see the "Getting the right Python interpreter" note below.
+
+### Getting the right Python interpreter
+
+If you're running this from VS Code and see `ModuleNotFoundError` despite
+the auto-install above, it likely means the interpreter VS Code is using
+doesn't have `pip` either (some minimal/tool-specific Python installs
+don't). Point VS Code at a full Python installation instead -- e.g. an
+Anaconda/Miniconda install, or python.org's installer -- via `Ctrl+Shift+P`
+-> "Python: Select Interpreter", or by setting `python.defaultInterpreterPath`
+in `.vscode/settings.json` at the repository root.

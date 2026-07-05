@@ -130,6 +130,14 @@ class TimingSettings:
     revolution_tolerance_deg: float = 0.5
     # How often (seconds) the engine polls motor position while spinning.
     position_poll_interval_s: float = 0.05
+    # EXPERIMENT SETTING. Angle-triggered capture: fire the camera every time
+    # PSG_QWP crosses this many degrees of additional travel. 1.0 deg ->
+    # 360 images per revolution; 0.5 deg -> 720. Reconstruction
+    # (matrix/own_code/CONTINOUS/4x4) needs at least ~25 evenly-spaced
+    # samples per revolution to resolve the 12th-harmonic content of a 1:5
+    # dual-rotating-QWP polarimeter; 360 gives generous oversampling for a
+    # robust least-squares fit without demanding an unrealistic trigger rate.
+    capture_angle_step_deg: float = 1.0
 
 
 @dataclass(slots=True)

@@ -33,20 +33,29 @@ generator/analyzer states, and — over one full revolution of the slower
 QWP — the frames sweep through a dense, well-conditioned set of
 polarization states without ever having to stop and settle the motors
 between shots. The intensity recorded at each moment, as a function of the
-rotating QWP's instantaneous angle, is a periodic waveform whose Fourier
-coefficients directly correspond to the unknown entries of the sample's
-Mueller matrix (the classical Fourier-analysis solution to this problem,
-rather than the discrete per-image linear system used in
-`matrix/own_code/`) — the 1:5 ratio specifically is what guarantees no two
-harmonics in that waveform collide and become impossible to separate.
+rotating QWP's instantaneous angle, is a periodic waveform; the *classical*
+solution (Azzam 1978) fits its Fourier coefficients, which map directly to
+the unknown entries of the sample's Mueller matrix — the 1:5 ratio
+specifically is what guarantees no two harmonics in that waveform collide
+and become impossible to separate.
 
-This is why continuous rotation isn't just "discrete mode but faster": the
-underlying math needed to turn captured frames into a Mueller matrix
-(Fourier analysis of a continuous waveform) is genuinely different from the
-per-image linear-system solve in `matrix/own_code/`, which is why the two
-acquisition schemes are independent and why no reconstruction code for
-continuous data exists yet — see "Current status" below for what's actually
-implemented today.
+This project takes a different but equivalent route:
+`matrix/own_code/CONTINOUS/4x4/` reuses the **exact same generalized
+per-pixel least-squares fit** as the discrete pipeline
+(`matrix/own_code/DISCRETE/4x4/solve_mueller.py`) rather than doing a
+Fourier decomposition. That fit already handles however many
+`(generator angle, analyzer angle, intensity)` rows a run has, with no
+assumption about a discrete angle grid — so a continuous sweep's ~360
+non-grid samples over one revolution slot into the identical linear system
+a handful of discrete-angle images would build; more, well-distributed
+samples just improve the fit's conditioning, the same way more discrete
+images do. This is why the acquisition schemes stay independent (different
+capture loops, different data shapes) while the reconstruction math itself
+is shared in spirit, not duplicated by a different method.
+
+Getting there requires images at *known* angles, which is why acquisition
+uses **angle-triggered** capture rather than a fixed frame rate — see
+"Capturing frames: angle-triggered, not frame-rate free-run" below.
 
 ## Testing
 
@@ -66,8 +75,7 @@ hand after any hardware change.
 
 ## Current status
 
-Everything up to the acquisition loop itself is implemented and runs today,
-including in dry-run mode:
+The full pipeline is implemented and runs today, including in dry-run mode:
 
 - Environment verification, hardware bring-up (discover → connect →
   initialize → enable → set velocity → home → optical zero) — once per
@@ -78,22 +86,28 @@ including in dry-run mode:
   (`PSA_Analyzer` moves briefly to fixed+90° for the dark shot, then back —
   this happens before rotation starts, so it doesn't conflict with the
   analyzer never moving *during* acquisition), a prompt to insert the
-  sample, then (once built) the acquisition itself — repeated for as many
-  samples as you want, each in its own folder. See "Measuring multiple
+  sample, then the continuous-rotation acquisition itself — repeated for as
+  many samples as you want, each in its own folder. See "Measuring multiple
   samples in one session" below.
 - A confirmation that illumination is on, asked again right before each
   sample's automatic bright/dark capture (there's no physical shutter, so
   this catches the light having been switched off while swapping samples).
 - Saving `Config/rotation_plan.json`, `Config/roi.json`, and
   `Config/experiment_config.json` per sample.
+- **The acquisition loop itself**
+  (`continuous_engine.ContinuousEngine.run_continuous()`): moves both QWPs
+  to a known start angle, sets `PSA_QWP`'s spin velocity to
+  `PSG_QWP`'s base rate times the chosen rotation ratio, starts continuous
+  rotation, then captures a frame every time `PSG_QWP` crosses
+  `capture_angle_step_deg` of additional travel (default 1°, 360
+  frames/revolution) until one full revolution is covered. Each frame's
+  *actual* polled angle (not the nominal threshold) is logged to
+  `Logs/experiment_log.csv` and checkpointed. See "Capturing frames:
+  angle-triggered, not frame-rate free-run" below for why this scheme was
+  chosen.
 
-**Not implemented**: the actual continuous-rotation acquisition loop
-(`continuous_engine.ContinuousEngine.run_continuous()`). Running
-`01_main.py` today gets all the way through camera verification for the
-first sample and then stops the whole session with a clear
-`NotImplementedError` instead of pretending to spin the QWPs or capture
-frames — this ends the session rather than offering "another sample?",
-since the same error would just recur for every sample.
+Once you have a captured run, `matrix/own_code/CONTINOUS/4x4/` reconstructs
+its Mueller matrix — see that folder's README.
 
 ## Measuring multiple samples in one session
 
@@ -103,9 +117,9 @@ Each sample gets its own `Data/YYYY-MM-DD_<sample name>` folder and its own
 `Logs/terminal_transcript.txt` (the one-time bring-up only appears in the
 first sample's transcript). Before every sample after the first, you're
 asked to confirm the previous sample has been removed. A real acquisition
-failure (once the engine exists) asks whether to skip that sample and
-continue with the next one; a `NotImplementedError` or emergency
-stop/Ctrl-C always ends the whole session instead.
+failure (a motor or camera error) asks whether to skip that sample and
+continue with the next one; an emergency stop/Ctrl-C always ends the whole
+session instead.
 
 ## Motorized SAMPLE stage (optional, per sample)
 
@@ -154,29 +168,44 @@ Rotation acceleration for all active motors (deg/s^2) [20]:
 The example above types `15` for velocity and presses Enter (blank) to
 accept the `20` default for acceleration. This applies uniformly to all
 four motors, since no sample's rotation ratio is known yet at bring-up
-time. Once a sample's ratio is chosen and continuous spinning is about to
-start, the (currently unimplemented) `continuous_engine.py` re-sets
-`PSA_QWP`'s velocity to `base_angular_velocity_deg_s × ratio` — e.g.
-`10 × 5 = 50 deg/s` for a `1:5` ratio — while `PSG_QWP` stays at the base
-rate (see that module's docstring, step 3). To change what's pre-filled on
-every future run, edit `config.py`'s `TimingSettings
+time; the value you enter is written back into `TimingSettings
+.base_angular_velocity_deg_s`, so it also becomes the base rate
+`continuous_engine.py` uses for the actual spin — not just the initial
+point-to-point moves. Once a sample's ratio is chosen and continuous
+spinning starts, `continuous_engine.py` re-sets `PSA_QWP`'s velocity to
+`base_angular_velocity_deg_s × ratio` — e.g. `10 × 5 = 50 deg/s` for a
+`1:5` ratio — while `PSG_QWP` stays at the base rate. To change what's
+pre-filled on every future run, edit `config.py`'s `TimingSettings
 .base_angular_velocity_deg_s`/`rotation_accel_deg_s2`.
 
 The motorized `SAMPLE` stage (above) is asked the same two prompts
 separately during its own bring-up, since it's a different, single-axis
 `MotorController` instance.
 
-## The one open decision blocking the acquisition loop
+## Capturing frames: angle-triggered, not frame-rate free-run
 
-Pick one before implementing `continuous_engine.py`:
+Two schemes were considered:
 
 - **Frame-rate free-run** — camera free-runs at a fixed fps; after each
   frame, poll both QWP encoders and log their angle against that frame.
-- **Angle-triggered** — poll QWP position in a tight loop and fire a
-  software trigger every time it crosses a configured angular threshold.
+- **Angle-triggered** (chosen) — poll `PSG_QWP` position in a loop and fire
+  a software trigger every time it crosses a configured angular step
+  (`TimingSettings.capture_angle_step_deg`).
 
-See `continuous_engine.py`'s module docstring for the trade-offs and an
-implementation sketch for each option.
+Angle-triggered was chosen because the reconstruction side
+(`matrix/own_code/CONTINOUS/4x4/`) needs images at *known* angles; this
+guarantees that directly regardless of real hardware's velocity ripple
+(acceleration jitter, encoder noise), whereas frame-rate free-run only
+gives evenly-spaced angles if velocity is perfectly constant — and would
+still need the actual encoder angle logged per frame to correct for when it
+isn't. The trade-off is a lower achievable frame rate, bounded by the
+poll-plus-software-trigger round trip; at the default 10°/s base velocity
+and 1° capture step, that's only ~10 triggers/second, comfortably within a
+software-triggered IDS camera's reach. If the motor ever spins faster than
+the capture pipeline can keep up, `continuous_engine.py` degrades
+gracefully — it just captures as fast as it can (each successive frame
+further apart in real angle than the nominal step) rather than crashing or
+missing the stop condition; see that module's docstring.
 
 ## Bright/dark reference ROI
 
@@ -210,12 +239,12 @@ earlier completed samples are unaffected).
 | `01_main.py` | Operator prompts and orchestration (run this file). |
 | `config.py` | Motor identities, offsets, camera settings, timing, and the continuous-only velocity/tolerance settings. |
 | `utils.py` | Environment checks, per-sample run-directory creation/renaming (`Data/YYYY-MM-DD_<sample name>`), JSON writing, rotation-ratio parsing. |
-| `motor_controller.py` | Kinesis discovery/bring-up plus `set_velocity`/`start_continuous`/`stop_continuous` — the primitives the future engine needs. |
-| `camera_controller.py` | IDS Peak configuration, software-triggered acquisition, BMP save/verify. |
+| `motor_controller.py` | Kinesis discovery/bring-up plus `set_velocity`/`start_continuous`/`stop_continuous` — the primitives the acquisition loop uses. |
+| `camera_controller.py` | IDS Peak configuration, software-triggered (angle-triggered) acquisition, BMP save/verify. |
 | `rotation_plan.py` | Serializes the chosen ratio and fixed angles to JSON. |
 | `checkpoint_manager.py` | Records progress within a single (non-resumable) revolution. |
 | `logger_manager.py` | Transcript, per-frame CSV logging, final report — continuous-shaped columns. |
-| `continuous_engine.py` | **The unimplemented acquisition loop.** Read its docstring first. |
+| `continuous_engine.py` | **The acquisition loop**: angle-triggered capture over one PSG_QWP revolution. Read its docstring for the design rationale. |
 | `calibration.py` | Ad-hoc zero-offset/verification helpers, plus `verify_with_reference_sample()` — moves a motorized `SAMPLE` stage (a known reference optic, not a real specimen) for system self-verification. Not called from `01_main.py`. |
 | `test_pure_functions.py` | Automated tests for this folder's hardware-independent logic. Run with `python -m unittest test_pure_functions -v`. |
 
@@ -254,3 +283,10 @@ part of `ACTIVE_MOTORS`.
 `FALLBACK_SENSOR_WIDTH`/`HEIGHT` are dry-run-only placeholders — verify
 against your camera's actual datasheet. `CameraController.frame_width`/
 `frame_height` read the real values from the camera on non-dry-run runs.
+
+`TimingSettings.capture_angle_step_deg` (default `1.0`, 360 frames per
+revolution) controls the acquisition side's angle-triggered capture density
+— see "Capturing frames" above. Lower it (e.g. `0.5`, 720 frames) for finer
+angular sampling, or raise it if your camera/software-trigger round trip
+can't sustain the resulting rate; `matrix/own_code/CONTINOUS/4x4/` works
+with whatever count a run actually produced.
