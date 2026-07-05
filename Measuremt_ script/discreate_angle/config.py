@@ -26,10 +26,12 @@ MOTOR_SN: dict[str, str] = {
     "PSG_QWP": "",
     "PSA_QWP": "",
     "PSA_Analyzer": "55542504",
-    # Not part of ACTIVE_MOTORS — a separate motorized mount for a KNOWN
-    # reference optic (e.g. a linear polarizer/QWP at a known angle) used
-    # only by calibration.verify_with_reference_sample() to validate the
-    # system, never touched during a normal experiment.
+    # Not part of ACTIVE_MOTORS — a separate motorized stage for a sample
+    # mount. Used two ways: (1) calibration.verify_with_reference_sample(),
+    # a KNOWN reference optic for system self-verification; (2)
+    # 01_main.setup_sample_stage(), an OPTIONAL per-sample motorized mount an
+    # operator may use to set/verify a real sample's orientation before
+    # inserting it for measurement. Leave blank if no SAMPLE stage exists.
     "SAMPLE": "",
 }
 
@@ -201,6 +203,11 @@ class ExperimentConfig:
     state_inputs: dict[str, list[float]] = field(default_factory=dict)
     camera: CameraSettings = field(default_factory=CameraSettings)
     timing: TimingSettings = field(default_factory=TimingSettings)
+    # Optional: this sample's optical angle on the motorized SAMPLE stage
+    # (01_main.setup_sample_stage()), or None if this sample was placed by
+    # hand instead. Purely a record for the saved config/report — the stage
+    # itself is already disconnected again by the time this is written.
+    sample_stage_optical_angle: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to plain JSON-safe types for utils.write_json()."""

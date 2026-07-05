@@ -235,6 +235,9 @@ Initialize and test the camera (Cockpit exposure/frame-rate selection)
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 Enter operator, sample name, and comments (sample name -> run folder name)
         ↓
+If a motorized SAMPLE stage is used: bring it up, set/verify its optical
+angle with a polarimeter, then disconnect it and set it aside
+        ↓
 Enter optical-angle states
         ↓
 Preview optical angles, motor angles, and total states
@@ -281,6 +284,40 @@ the next one, rather than losing the rest of the queue.
 Mode (3×3 vs 4×4) is fixed for the whole session — switching between them
 mid-session would change which motors are active, which really does
 require a reconnect, so that stays a restart-the-script situation.
+
+## Motorized SAMPLE stage (optional, per sample)
+
+If your specimen is mounted on its own motorized rotation stage
+(`config.MOTOR_SN["SAMPLE"]`/`ZERO_OFFSET["SAMPLE"]`), `01_main.py` asks
+right after that sample's operator/sample/comments prompt:
+
+```text
+Do you have a motorized SAMPLE stage for this sample?
+```
+
+Answering yes runs the exact same bring-up sequence as the other motors —
+discover → connect → initialize → enable → home — scoped to just the
+`SAMPLE` axis, then asks for the target optical angle (e.g. `30`, `45`, or
+any arbitrary angle) and moves there:
+
+```text
+motor angle = (sample optical angle + ZERO_OFFSET["SAMPLE"]) modulo 360
+```
+
+Verify that orientation with a polarimeter, confirm, and the SAMPLE stage
+is disconnected again immediately. Physically lift the mounted assembly out
+of the beam path and set it aside — the rest of instrument setup below
+(bright/dark reference capture) needs an empty beam. The sample is then
+reinserted (still fixed at the angle you just set) at the usual "insert the
+sample now" prompt, right before acquisition starts.
+
+Answering no (the default) skips this entirely — nothing else about the
+flow changes for a sample placed by hand. The chosen angle, if any, is
+saved as `sample_stage_optical_angle` in `Config/experiment_config.json`.
+
+This is separate from `calibration.verify_with_reference_sample()`, which
+uses the same `SAMPLE` motor but for a *known* reference optic during
+system self-verification, not for orienting a real specimen.
 
 ## Camera preparation before every experiment
 
@@ -534,7 +571,7 @@ comments open to cross-check both at once.
 
 | Setting | File / location | What it controls |
 |---|---|---|
-| `MOTOR_SN` | `config.py` | USB serial number of each K10CR2/M rotator, plus a `"SAMPLE"` entry for the optional motorized reference-optic stage used only by `calibration.verify_with_reference_sample()` (not part of any experiment's `ACTIVE_MOTORS`). Must match the physical device for that axis or `MotorController.discover()` raises `MotorError`. |
+| `MOTOR_SN` | `config.py` | USB serial number of each K10CR2/M rotator, plus a `"SAMPLE"` entry for the optional motorized sample stage (not part of any experiment's `ACTIVE_MOTORS`) — used both by `calibration.verify_with_reference_sample()` (a known reference optic) and by `01_main.setup_sample_stage()` (a real specimen's orientation). Must match the physical device for that axis or `MotorController.discover()` raises `MotorError`. Leave blank if no SAMPLE stage exists. |
 | `ZERO_OFFSET` | `config.py` | Motor angle that equals optical zero for each axis, found with `calibration.py`. Wrong values silently rotate every measurement by a constant offset. |
 | `KINESIS_DIR` | `config.py` | Path to the Thorlabs Kinesis install. Checked by `utils.check_environment()` and used by `motor_controller._load_kinesis()`. |
 | `MOTOR_SETTINGS_NAME` | `config.py` | Must match the K10CR2 device-settings profile name shown in Kinesis. |
@@ -571,6 +608,7 @@ zero, new lab PC, etc.).
 | `choose_mode_first` | First prompt of every fresh session: 3×3 vs 4×4. Fixes which motors are active for the whole session (all samples). |
 | `print_environment_report` | Runs `utils.check_environment()`, prints OK/MISSING per check, returns whether all passed. |
 | `ask_metadata` | Asks operator/sample/comments for one sample. The sample name doubles as that sample's run-folder name. |
+| `setup_sample_stage` | Optional per-sample step, asked right after `ask_metadata`: if the operator has a motorized `SAMPLE` stage, brings it up (discover → connect → initialize → enable → home), asks the target optical angle, moves there, then disconnects it again for the empty-beam camera reference capture. Returns the chosen angle (saved as `ExperimentConfig.sample_stage_optical_angle`) or `None`. |
 | `ask_angles_for_mode` | Asks the mode-specific angle prompts and builds that sample's `ExperimentConfig` pieces (`fixed_angles`, `state_inputs`) and `MeasurementState` list via `state_generator`. |
 | `states_from_config` | Rebuilds the identical `MeasurementState` list from a saved config, for `--resume`, without re-asking the operator. |
 | `confirm_stage` | Yes/no gate before a safety-sensitive step; "no" cancels the whole session. |

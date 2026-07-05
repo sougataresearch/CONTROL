@@ -107,6 +107,33 @@ failure (once the engine exists) asks whether to skip that sample and
 continue with the next one; a `NotImplementedError` or emergency
 stop/Ctrl-C always ends the whole session instead.
 
+## Motorized SAMPLE stage (optional, per sample)
+
+If your specimen is mounted on its own motorized rotation stage
+(`config.MOTOR_SN["SAMPLE"]`/`ZERO_OFFSET["SAMPLE"]`), `01_main.py` asks
+right after that sample's operator/sample/comments prompt:
+
+```text
+Do you have a motorized SAMPLE stage for this sample?
+```
+
+Answering yes runs the exact same bring-up sequence as the other motors —
+discover → connect → initialize → enable → home — scoped to just the
+`SAMPLE` axis, then asks for the target optical angle (e.g. `30`, `45`, or
+any arbitrary angle) and moves there (`motor angle = (optical angle +
+ZERO_OFFSET["SAMPLE"]) modulo 360`). Verify that orientation with a
+polarimeter, confirm, and the SAMPLE stage is disconnected again
+immediately — set the mounted assembly aside while the rest of instrument
+setup (bright/dark reference capture) runs with an empty beam, then
+reinsert it (still at the angle you just set) at the usual "insert the
+sample now" prompt right before continuous rotation starts.
+
+Answering no (the default) skips this entirely. The chosen angle, if any,
+is saved as `sample_stage_optical_angle` in `Config/experiment_config.json`.
+Separate from `calibration.verify_with_reference_sample()`, which uses the
+same `SAMPLE` motor but for a *known* reference optic during system
+self-verification, not for orienting a real specimen.
+
 ## The one open decision blocking the acquisition loop
 
 Pick one before implementing `continuous_engine.py`:
@@ -166,9 +193,10 @@ earlier completed samples are unaffected).
 `../discreate_angle/config.py`, not imported — if you recalibrate a motor
 or swap hardware, update both files (or run `../check_config_sync.py` to
 check they still agree). Both also carry a `"SAMPLE"` entry for
-the optional motorized reference-optic stage used only by
-`calibration.verify_with_reference_sample()`; it is not part of
-`ACTIVE_MOTORS` and is never touched during a normal run.
+the optional motorized `SAMPLE` stage used by
+`calibration.verify_with_reference_sample()` (a known reference optic) and
+by `01_main.setup_sample_stage()` (orienting a real specimen); it is not
+part of `ACTIVE_MOTORS`.
 
 `FALLBACK_SENSOR_WIDTH`/`HEIGHT` are dry-run-only placeholders — verify
 against your camera's actual datasheet. `CameraController.frame_width`/

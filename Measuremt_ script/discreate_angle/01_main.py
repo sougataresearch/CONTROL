@@ -215,6 +215,65 @@ def initialize_motors(motors: MotorController) -> None:
     motors.move_to_optical_zero_all()
 
 
+def setup_sample_stage(timing: TimingSettings, dry_run: bool) -> float | None:
+    """Optionally bring up the motorized SAMPLE stage for THIS sample and set
+    its optical angle, before any other per-sample setup runs.
+
+    Asked right after the sample's metadata/run folder are known, and before
+    capture_camera_references() (which needs an empty beam path). If the
+    operator says yes, this runs the exact same bring-up sequence as
+    initialize_motors() — discover -> connect -> initialize -> enable ->
+    home — but scoped to just the "SAMPLE" motor (config.MOTOR_SN["SAMPLE"]/
+    ZERO_OFFSET["SAMPLE"]), since MotorController.names is otherwise fixed to
+    whatever ACTIVE_MOTORS[mode] chose for this session. Then asks the
+    target optical angle (e.g. 30, 45, or any arbitrary angle) and moves
+    there via optical_to_motor(angle, ZERO_OFFSET["SAMPLE"]) so the operator
+    can verify the orientation with a polarimeter.
+
+    Once verified, the SAMPLE stage is disconnected again immediately — the
+    operator then physically lifts the whole mounted assembly out of the
+    beam path and sets it aside while the rest of instrument setup (camera
+    bright/dark references) runs with an empty beam, then reinserts it
+    (still fixed at the angle just set) at the existing "insert the sample
+    now" prompt right before acquisition.
+
+    Returns the chosen optical angle, or None if the operator has no
+    motorized SAMPLE stage for this sample (the rest of the flow is
+    unaffected either way).
+    """
+
+    if not yes_no("Do you have a motorized SAMPLE stage for this sample?", default=False):
+        return None
+
+    sample_motor = MotorController(("SAMPLE",), timing, dry_run)
+    sample_motor.discover()
+    confirm_stage("Continue with the SAMPLE stage listed above?")
+    sample_motor.connect_all()
+    confirm_stage("SAMPLE stage connected. Initialize it?")
+    sample_motor.initialize_all()
+    confirm_stage("SAMPLE stage initialized. Enable it?")
+    sample_motor.enable_all()
+    confirm_stage("SAMPLE stage enabled. Home it?")
+    sample_motor.home_all()
+
+    optical_angle = ask_float(
+        "Sample optical angle to set on the SAMPLE stage (e.g. 30, 45, or any arbitrary angle): "
+    ) % 360
+    motor_angle = optical_to_motor(optical_angle, ZERO_OFFSET["SAMPLE"])
+    sample_motor.move_motor_angle("SAMPLE", motor_angle)
+    print(
+        f"SAMPLE stage at optical {optical_angle:.3f}° (motor {motor_angle:.3f}°). "
+        "Verify this orientation with a polarimeter now."
+    )
+    confirm_stage("Orientation verified. Disconnect the SAMPLE stage and set it aside for camera setup?")
+    sample_motor.close()
+    print(
+        "SAMPLE stage disconnected. Keep the sample set aside, still at this angle, "
+        "until the 'insert the sample now' prompt just before acquisition."
+    )
+    return optical_angle
+
+
 def move_analyzer_to_optical(motors: MotorController, timing: TimingSettings, optical_angle: float) -> None:
     """Move the analyzer using its configured optical-zero calibration.
 
@@ -476,6 +535,11 @@ def run_resumed_session(
 
     states = states_from_config(config)
     print(f"Resuming saved {mode} experiment: {run}")
+    if config.sample_stage_optical_angle is not None:
+        print(
+            f"Sample stage was set to optical {config.sample_stage_optical_angle:.3f}° "
+            "in the original session — not re-asked on resume."
+        )
 
     if not yes_no("Begin hardware initialization and acquisition?"):
         print(f"Configuration retained at {run}")
@@ -648,6 +712,12 @@ def run_fresh_session(initial_run: Path) -> int:
             transcript = SessionTranscript(run / "Logs" / "terminal_transcript.txt")
             transcript.start()
 
+            # Set/verify the sample's own orientation on the motorized SAMPLE
+            # stage (if any) BEFORE the rest of this sample's setup, since the
+            # sample must then be set aside for the empty-beam-path camera
+            # reference capture below.
+            sample_stage_optical_angle = setup_sample_stage(timing_settings, dry_run)
+
             fixed_angles, state_inputs, states = ask_angles_for_mode(mode)
             print(f"Total states: {len(states)}")
             config = ExperimentConfig(
@@ -659,6 +729,7 @@ def run_fresh_session(initial_run: Path) -> int:
                 state_inputs=state_inputs,
                 camera=camera_settings,
                 timing=timing_settings,
+                sample_stage_optical_angle=sample_stage_optical_angle,
             )
             write_json(run / "Config" / "experiment_config.json", config.to_dict())
 

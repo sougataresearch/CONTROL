@@ -133,6 +133,56 @@ def initialize_motors(motors: MotorController) -> None:
     motors.move_to_optical_zero_all()
 
 
+def setup_sample_stage(timing: TimingSettings, dry_run: bool) -> float | None:
+    """Optionally bring up the motorized SAMPLE stage for THIS sample and set
+    its optical angle, before the rest of this sample's setup.
+
+    Deliberate duplicate of discreate_angle/01_main.py's
+    setup_sample_stage() — same reasoning: run the SAME bring-up sequence as
+    initialize_motors() (discover -> connect -> initialize -> enable ->
+    home) but scoped to just "SAMPLE", ask the target optical angle, move
+    there via optical_to_motor(angle, ZERO_OFFSET["SAMPLE"]) so the operator
+    can verify the orientation with a polarimeter, then disconnect the stage
+    again so the operator can set the sample aside for the empty-beam-path
+    camera reference capture, reinserting it at the existing "insert the
+    sample now" prompt right before continuous rotation starts.
+
+    Returns the chosen optical angle, or None if this sample has no
+    motorized SAMPLE stage.
+    """
+
+    if not yes_no("Do you have a motorized SAMPLE stage for this sample?", default=False):
+        return None
+
+    sample_motor = MotorController(("SAMPLE",), timing, dry_run)
+    sample_motor.discover()
+    confirm_stage("Continue with the SAMPLE stage listed above?")
+    sample_motor.connect_all()
+    confirm_stage("SAMPLE stage connected. Initialize it?")
+    sample_motor.initialize_all()
+    confirm_stage("SAMPLE stage initialized. Enable it?")
+    sample_motor.enable_all()
+    confirm_stage("SAMPLE stage enabled. Home it?")
+    sample_motor.home_all()
+
+    optical_angle = ask_float(
+        "Sample optical angle to set on the SAMPLE stage (e.g. 30, 45, or any arbitrary angle): "
+    ) % 360
+    motor_angle = optical_to_motor(optical_angle, ZERO_OFFSET["SAMPLE"])
+    sample_motor.move_motor_angle("SAMPLE", motor_angle)
+    print(
+        f"SAMPLE stage at optical {optical_angle:.3f}° (motor {motor_angle:.3f}°). "
+        "Verify this orientation with a polarimeter now."
+    )
+    confirm_stage("Orientation verified. Disconnect the SAMPLE stage and set it aside for camera setup?")
+    sample_motor.close()
+    print(
+        "SAMPLE stage disconnected. Keep the sample set aside, still at this angle, "
+        "until the 'insert the sample now' prompt just before acquisition."
+    )
+    return optical_angle
+
+
 def park_fixed_polarizers(motors: MotorController, fixed_angles: dict[str, float]) -> None:
     """Move PSG_Polarizer/PSA_Analyzer to this sample's fixed optical angle.
     They never move again for the rest of this sample's run — only the two
@@ -373,6 +423,12 @@ def run_fresh_session(initial_run: Path) -> int:
             transcript = SessionTranscript(run / "Logs" / "terminal_transcript.txt")
             transcript.start()
 
+            # Set/verify the sample's own orientation on the motorized SAMPLE
+            # stage (if any) before the rest of this sample's setup, since the
+            # sample must then be set aside for the empty-beam-path camera
+            # reference capture below.
+            sample_stage_optical_angle = setup_sample_stage(timing_settings, dry_run)
+
             fixed_angles, ratio = ask_fixed_and_ratio()
             config = ExperimentConfig(
                 metadata=metadata,
@@ -382,6 +438,7 @@ def run_fresh_session(initial_run: Path) -> int:
                 rotation_ratio=ratio,
                 camera=camera_settings,
                 timing=timing_settings,
+                sample_stage_optical_angle=sample_stage_optical_angle,
             )
             write_json(run / "Config" / "rotation_plan.json", continuous_plan(ratio, fixed_angles))
             write_json(run / "Config" / "experiment_config.json", config.to_dict())
