@@ -137,8 +137,11 @@ def _date_relative_path(path: Path) -> Path:
     return Path(path.name)
 
 
+RESULT_ROOT = Path(r"C:\COMPARE_CASES\RESULT")
+
+
 def default_output_directory(run_dir: Path) -> Path:
-    return Path(__file__).resolve().parent / "Results" / _date_relative_path(run_dir)
+    return RESULT_ROOT / "transmission" / "3x3" / "reconstructions" / _date_relative_path(run_dir)
 
 
 def _git_commit_hash() -> str:
@@ -180,6 +183,13 @@ def save_outputs(result: MuellerResult3x3, out_dir: Path, run_dir: Path,
     np.save(out_dir / "mueller_matrix_normalized.npy", result.matrix)
     np.save(out_dir / "mueller_matrix_raw.npy", result.matrix_raw)
     np.save(out_dir / "residual_rms.npy", result.residual_rms)
+
+    # Lets validate_against_theory.py verify a cached reconstruction here was
+    # made with the calibration it's about to use, before reusing it instead
+    # of redoing the reconstruction from scratch.
+    (out_dir / "calibration_used.json").write_text(
+        json.dumps({"extinction_ratio": extinction_ratio}, indent=2), encoding="utf-8",
+    )
 
     np.set_printoptions(precision=4, suppress=True)
     with open(out_dir / "summary.txt", "w", encoding="utf-8") as fh:

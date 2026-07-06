@@ -102,15 +102,19 @@ either to accept the suggested default shown in brackets — the ideal values
 after that (remembered in `.last_calibration.json` next to `main.py`, not
 committed to git).
 
-Results are saved to `own_code/4x4/Results/<date>/.../<run folder name>/` by
-default -- the run directory's own date/sample-type path is mirrored under
-`Results/` (e.g. `Data/03072026/qwp/qwp90` -> `Results/03072026/qwp/qwp90/`),
-so the same sample name captured on a different date doesn't collide with or
-overwrite an earlier result. If `RUN_DIRECTORY` isn't under a dated
-`Data/<8-digit-date>/...` layout, it falls back to just `Results/<run folder
-name>/`. This is deliberately *not* inside the data folder either way, since
-`RUN_DIRECTORY` may point somewhere else entirely. Set `OUTPUT_DIRECTORY` at
-the top of `main.py` if you want them somewhere specific instead.
+Results are saved to
+`C:\COMPARE_CASES\RESULT\transmission\4x4\reconstructions\<date>\.../<run
+folder name>\` by default -- the run directory's own date/sample-type path
+is mirrored under that folder (e.g. `Data/03072026/qwp/qwp90` ->
+`RESULT/transmission/4x4/reconstructions/03072026/qwp/qwp90/`), so the same
+sample name captured on a different date doesn't collide with or overwrite
+an earlier result. If `RUN_DIRECTORY` isn't under a dated
+`Data/<8-digit-date>/...` layout, it falls back to just
+`RESULT/transmission/4x4/reconstructions/<run folder name>/`. `RESULT/` is a
+single shared output root for every tool in this whole project (see the root
+README) -- it's created automatically the first time anything writes to it;
+you never need to create it yourself. Set `OUTPUT_DIRECTORY` at the top of
+`main.py` if you want a specific run's output somewhere else instead.
 
 You can also pass everything as command-line arguments instead of editing
 the file or answering the prompts, e.g. for scripting multiple runs without
@@ -133,16 +137,19 @@ If you point this at a run whose `experiment_config.json` says `"mode":
 "3x3"`, it will refuse with a clear error instead of silently misreading
 the filenames -- use `own_code/3x3` for that run instead.
 
-## What gets written to `Results/<date>/.../<run folder name>/`
+## What gets written to `RESULT/transmission/4x4/reconstructions/<date>/.../<run folder name>/`
 
 | File | Contents |
 |---|---|
 | `mueller_matrix_normalized.npy` | `(H, W, 4, 4)` array, every pixel's Mueller matrix, normalized so `m00 = 1` |
 | `mueller_matrix_raw.npy` | Same shape, before the `m00` normalization |
 | `residual_rms.npy` | `(H, W)` per-pixel fit error -- how well the reconstructed matrix explains the measured intensities |
-| `summary.txt` | Condition number, mean residual, and the spatially-averaged Mueller matrix, as text |
+| `calibration_used.json` | `{"extinction_ratio": ..., "retardance_deg": ...}` -- lets `validate_against_theory.py` verify it can safely reuse this reconstruction instead of redoing it (see below) |
+| `diattenuation_map.npy`, `polarizance_map.npy`, `depolarization_index_map.npy`, `retardance_deg_map.npy` | `(H, W)` per-pixel polar-decomposition diagnostics -- see "Polar decomposition" below |
+| `summary.txt` | Condition number, mean residual, the spatially-averaged Mueller matrix, the mean matrix's polar decomposition, and provenance (git commit, timestamp, source run, calibration), as text |
 | `mueller_matrix_overview.png` | 4x4 grid of grayscale maps, one per matrix element |
 | `residual_rms.png` | Heatmap of the residual, for spotting bad pixels/regions at a glance |
+| `polar_decomposition.png` | Three heatmaps: per-pixel diattenuation, polarizance, depolarization index |
 
 ## The pipeline, in order
 
@@ -167,7 +174,101 @@ the filenames -- use `own_code/3x3` for that run instead.
 `solve_mueller.py`, not directly by `main.py`.
 
 3. **`main.save_outputs(result, out_dir)`**
-   Writes everything in the table above.
+   Also calls `polar_decomposition.decompose()` on both the per-pixel matrix
+   and the mean matrix, and writes everything in the table above.
+
+## Which file do I run, and in what order?
+
+`main.py` is the only file required for a single capture. The other four
+scripts are optional, used in this order as your workflow matures:
+
+| Order | Script | When to use it |
+|---|---|---|
+| 1 | `main.py` | Every single capture. Reconstructs and saves one run's Mueller matrix plus its polar decomposition. |
+| 2 | `average_rounds.py` | You captured >= 3 repeat rounds of the *same* sample (see `../../NAMING.md`). Reconstructs each round independently (identical math to `main.py`), then reports the mean and standard deviation *across rounds*. Edit `ROUND_DIRECTORIES` at the top, then `python average_rounds.py`. |
+| 3 | `validate_against_theory.py` | You have a reference sample with a *known* theoretical answer (air, an ideal linear polarizer, or an ideal QWP at a known angle). Edit `SAMPLE_DIRECTORIES`, then `python validate_against_theory.py` -- see "Checking against a known theoretical matrix" below. |
+| 4 (conditional) | `fit_calibration.py` | Only if step 3 showed your air sample deviating from identity by more than noise. Numerically searches for the `(extinction_ratio, retardance_deg)` pair that minimizes that deviation. Edit `AIR_DIRECTORY`, then `python fit_calibration.py`. See "Calibrating from an air capture" below. |
+
+### Checking against a known theoretical matrix (`validate_against_theory.py`)
+
+Works exactly like the 3x3 tool (see `../3x3/README.md`'s fuller
+explanation of the Frobenius norm, with a worked numeric example) but with
+one important difference for 4x4: the theoretical matrices here are **not**
+hand-typed formulas -- `theoretical_matrix()` calls this folder's own
+`mueller_linear_polarizer()`/`mueller_retarder()` directly (the exact same
+functions the reconstruction's forward model is built from). 4x4 matrices
+carry extra circular-polarization (`S3`-coupled) terms that are easy to get
+wrong typing out a formula by hand; reusing the real function means any
+mismatch you see reflects an actual calibration issue, not a bug in a
+separately-derived "theory" formula.
+
+```
+error = ||measured - theory||_F = sqrt( sum over every element of (measured_ij - theory_ij)^2 )
+```
+
+`N = 16` here (a 4x4 matrix has 16 elements), so `Frobenius norm = sqrt(16) x RMSE = 4 x RMSE`
+-- same relationship to MSE/RMSE as the 3x3 case, just with a different
+constant. It prints each non-air sample's error as a multiple of air's own
+error; ratios all close to 1x point to a systematic PSG/PSA modeling issue
+rather than something sample-specific.
+
+### Calibrating from an air capture (`fit_calibration.py`)
+
+Same idea as the 3x3 tool, extended to two parameters instead of one: air's
+true matrix is the identity with certainty, so `fit_calibration.py`
+reconstructs your air capture across a range of candidate
+`(extinction_ratio, retardance_deg)` pairs and reports whichever pair gets
+closest to identity. Because there are two coupled parameters instead of
+one, it uses **coordinate descent** -- alternately holding one parameter
+fixed while grid-searching the other, repeating for several rounds until
+both stop improving -- rather than a single 1D sweep.
+
+**What this can't fix:** exactly as in the 3x3 tool, a PSG/PSA angle-zero
+misalignment (`ZERO_OFFSET`) is a physical motor calibration on the
+acquisition side, not something curve-fitting after the fact can correct.
+If the best achievable error is still well above your per-pixel noise floor,
+that's the more likely culprit.
+
+## Polar decomposition (`polar_decomposition.py`)
+
+A raw 4x4 matrix of 16 numbers is hard to interpret at a glance.
+`polar_decomposition.py` reduces it to four physically meaningful
+diagnostics, computed directly from the matrix (no assumption about what
+kind of sample it is):
+
+- **Diattenuation** -- read straight from `M`'s first row (`M[0, 1:4]`,
+  normalized by `M[0,0]`): how much the sample's transmitted brightness
+  depends on the input polarization angle. `0` = none (e.g. air); `1` =
+  perfectly polarizing (only one input polarization gets through at all).
+- **Polarizance** -- read straight from `M`'s first column (`M[1:4, 0]`):
+  how strongly the sample imposes its own polarization onto originally
+  unpolarized light. For a simple, non-depolarizing sample this numerically
+  equals its diattenuation (verified in `test_polar_decomposition.py`).
+- **Depolarization index** -- `sqrt((||M||_F^2 - m00^2) / (3 * m00^2))`
+  (the Gil-Bernabeu index): `1` means the sample is "pure"/deterministic
+  (fully describable by a single Jones matrix, whether or not it also
+  diattenuates or retards); `0` means it fully scrambles polarization into
+  unpolarized light, like a rough or strongly scattering surface. This
+  specific formula (rather than the fuller Lu-Chipman eigenvalue-based
+  index) was chosen because it's one closed-form expression with no
+  matrix-inversion/decomposition step, leaving less room for a sign or
+  convention error to creep in -- see the module's own docstring.
+- **Estimated retardance** -- removes only the diattenuation component
+  (via the Lu-Chipman diattenuator matrix and its inverse) and reads the
+  trace of what's left. **Exact** for a diattenuator-then-linear-retarder
+  sample with no depolarization (verified in
+  `test_polar_decomposition.py`); only an **approximation** once
+  `depolarization_index` is meaningfully below `1`, since fully
+  compensating for a depolarizer's effect on the trace would need the full
+  eigenvalue-based decomposition this module deliberately doesn't
+  implement (again, to avoid the higher error-surface area of that fuller
+  method).
+
+Every one of these formulas is checked in `test_polar_decomposition.py`
+against Mueller matrices built with a *known* answer -- an ideal
+diattenuator, an ideal retarder at several angles, a hand-built diagonal
+depolarizer with an analytically-computed expected index, and a composite
+diattenuator+retarder case -- rather than trusted from memory alone.
 
 ## The physics
 

@@ -28,7 +28,16 @@ known references), then:
 Before processing anything, it prints every configured folder with an
 OK/MISSING check and asks you to confirm the list is complete and correct
 -- a forgotten or mistyped folder would otherwise silently produce one
-fewer comparison with no error.
+fewer comparison with no error. You will then be prompted for the polarizer
+extinction ratio and QWP retardance (press Enter on either to accept the
+suggested default -- whatever was last used by this script or main.py in
+this same folder, remembered in .last_calibration.json), applied to every
+sample in this run so they're all compared on an equal footing.
+
+If main.py already reconstructed a given sample with this exact calibration
+(saved under its default Results/<date-relative-path> location), that
+cached reconstruction is reused instead of redoing it from raw images --
+only on an exact calibration match, otherwise it's recomputed fresh.
 """
 
 from __future__ import annotations
@@ -66,7 +75,10 @@ def _ensure_dependencies() -> None:
 
 _ensure_dependencies()
 
+import csv
+import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -84,15 +96,55 @@ from solve_mueller import reconstruct
 # with "fixed_angles" for PSG_Polarizer/PSA_Analyzer).
 # ---------------------------------------------------------------------------
 SAMPLE_DIRECTORIES = [
-    r"G:\control\Data\03072026\qwp\air",
-    r"G:\control\Data\03072026\qwp\lp30",
-    r"G:\control\Data\03072026\qwp\lp45",
-    r"G:\control\Data\03072026\qwp\qwp90",
+    r"C:\COMPARE_CASES\control\Data\03072026\qwp\air",
+    r"C:\COMPARE_CASES\control\Data\03072026\qwp\lp30",
+    r"C:\COMPARE_CASES\control\Data\03072026\qwp\lp45",
+    r"C:\COMPARE_CASES\control\Data\03072026\qwp\qwp90",
 ]
-
-EXTINCTION_RATIO = 0.0
-RETARDANCE_DEG = 90.0
 # ---------------------------------------------------------------------------
+
+RESULT_ROOT = Path(r"C:\COMPARE_CASES\RESULT")
+
+# Shared with main.py in this same folder, so "last used" reflects whichever
+# of the two scripts you ran most recently -- not committed to git.
+_CALIBRATION_STATE_PATH = Path(__file__).resolve().parent / ".last_calibration.json"
+_CALIBRATION_LOG_PATH = Path(__file__).resolve().parent / ".calibration_log.csv"
+
+
+def _load_last_calibration() -> dict:
+    try:
+        return json.loads(_CALIBRATION_STATE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_last_calibration(values: dict) -> None:
+    _CALIBRATION_STATE_PATH.write_text(json.dumps(values, indent=2), encoding="utf-8")
+
+
+def _append_calibration_log(extinction_ratio: float, retardance_deg: float) -> None:
+    is_new = not _CALIBRATION_LOG_PATH.exists()
+    with open(_CALIBRATION_LOG_PATH, "a", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        if is_new:
+            writer.writerow(["timestamp", "run_directory", "extinction_ratio", "retardance_deg"])
+        writer.writerow([datetime.now().isoformat(timespec="seconds"),
+                          "validate_against_theory (multiple)", extinction_ratio, retardance_deg])
+
+
+def ask_float(prompt: str, default: float) -> float:
+    """Ask for a numeric value, showing ``default`` in brackets; press Enter
+    (blank input) to accept it as-is. Loops until a parseable number is
+    entered."""
+
+    while True:
+        text = input(f"{prompt} [{default:g}]: ").strip()
+        if not text:
+            return default
+        try:
+            return float(text)
+        except ValueError:
+            print("Enter a numeric value.")
 
 
 def confirm_sample_directories(paths: list) -> None:
@@ -155,6 +207,47 @@ def theoretical_matrix(sample_name: str) -> np.ndarray:
     )
 
 
+@dataclass
+class _CachedResult:
+    matrix: np.ndarray
+    matrix_mean: np.ndarray
+
+
+def _load_cached_reconstruction(sample_dir: Path, extinction_ratio: float, retardance_deg: float):
+    """If main.py already reconstructed this exact sample with this exact
+    calibration, reuse its saved output instead of redoing the reconstruction
+    from raw images -- solve_mueller.reconstruct() is deterministic given the
+    same images/extinction_ratio/retardance_deg, so recomputing it here would
+    just be duplicate work. Returns None (falls back to a fresh reconstruction)
+    if main.py hasn't been run for this sample, or was run with different
+    calibration values -- a stale/mismatched cache would silently corrupt the
+    comparison, so it's only reused on an exact match. Assumes main.py used
+    its default output location (Results/<date-relative-path> next to
+    main.py); a custom --out won't be found here."""
+
+    cache_dir = (RESULT_ROOT / "transmission" / "4x4" / "reconstructions"
+                 / _date_relative_path(sample_dir))
+    calibration_path = cache_dir / "calibration_used.json"
+    matrix_path = cache_dir / "mueller_matrix_normalized.npy"
+    raw_path = cache_dir / "mueller_matrix_raw.npy"
+    if not (calibration_path.exists() and matrix_path.exists() and raw_path.exists()):
+        return None
+
+    try:
+        cached_calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    if (cached_calibration.get("extinction_ratio") != extinction_ratio
+            or cached_calibration.get("retardance_deg") != retardance_deg):
+        return None
+
+    matrix = np.load(matrix_path)
+    matrix_raw = np.load(raw_path)
+    mean_raw = matrix_raw.mean(axis=(0, 1))
+    matrix_mean = mean_raw / mean_raw[0, 0]
+    return _CachedResult(matrix=matrix, matrix_mean=matrix_mean)
+
+
 _DATE_DIR_RE = re.compile(r"^\d{8}$")
 
 
@@ -190,7 +283,17 @@ def _git_commit_hash() -> str:
 def main() -> None:
     confirm_sample_directories(SAMPLE_DIRECTORIES)
 
-    base_dir = Path(__file__).resolve().parent / "Results" / "validation_against_theory"
+    last_calibration = _load_last_calibration()
+    extinction_ratio = ask_float(
+        "Polarizer extinction ratio Imin/Imax", last_calibration.get("extinction_ratio", 0.0)
+    )
+    retardance_deg = ask_float(
+        "QWP retardance in degrees", last_calibration.get("retardance_deg", 90.0)
+    )
+    _save_last_calibration({"extinction_ratio": extinction_ratio, "retardance_deg": retardance_deg})
+    _append_calibration_log(extinction_ratio, retardance_deg)
+
+    base_dir = RESULT_ROOT / "transmission" / "4x4" / "validation_against_theory"
     base_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
@@ -199,8 +302,12 @@ def main() -> None:
         sample_name = sample_dir.name
         theory = theoretical_matrix(sample_name)
 
-        run = load_run(sample_dir)
-        result = reconstruct(run, extinction_ratio=EXTINCTION_RATIO, retardance_deg=RETARDANCE_DEG)
+        result = _load_cached_reconstruction(sample_dir, extinction_ratio, retardance_deg)
+        if result is not None:
+            print(f"{sample_name}: reusing main.py's cached reconstruction (matching calibration)")
+        else:
+            run = load_run(sample_dir)
+            result = reconstruct(run, extinction_ratio=extinction_ratio, retardance_deg=retardance_deg)
 
         mean_matrix_error = float(np.linalg.norm(result.matrix_mean - theory))
         diff = result.matrix - theory[None, None, :, :]
@@ -246,8 +353,8 @@ def main() -> None:
         fh.write(f"Generated: {datetime.now().isoformat(timespec='seconds')}\n")
         fh.write(f"Git commit: {_git_commit_hash()}\n")
         fh.write(f"Sample directories: {SAMPLE_DIRECTORIES}\n")
-        fh.write(f"Extinction ratio: {EXTINCTION_RATIO}\n")
-        fh.write(f"Retardance (deg): {RETARDANCE_DEG}\n")
+        fh.write(f"Extinction ratio: {extinction_ratio}\n")
+        fh.write(f"Retardance (deg): {retardance_deg}\n")
 
     air_row = next((r for r in rows if r[0].lower() == "air"), None)
     print()

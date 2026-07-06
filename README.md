@@ -18,15 +18,22 @@ COMPARE_CASES/
 │   │   └── check_config_sync.py   ← standalone: diffs motor calibration between the two folders
 │   └── matrix/                    ← offline Mueller matrix reconstruction from saved images
 │       ├── NAMING.md               ← the one folder-naming rule, used by every capture
-│       ├── own_code/
+│       ├── own_code/               ← TRANSMISSIVE-sample reconstruction (see below)
 │       │   ├── DISCRETE/
 │       │   │   ├── 3x3/            ← reconstructs a 3x3 Mueller matrix from discrete-angle images
 │       │   │   └── 4x4/            ← reconstructs a full 4x4 Mueller matrix from discrete-angle images
 │       │   └── CONTINOUS/
 │       │       └── 4x4/            ← reconstructs a full 4x4 Mueller matrix from a continuous-rotation run
+│       ├── own_code_reflection/    ← REFLECTIVE-sample reconstruction (mirror, bare/coated wafer) -- see below
+│       │   ├── DISCRETE/
+│       │   │   ├── 3x3/
+│       │   │   └── 4x4/
+│       │   └── CONTINOUS/
+│       │       └── 4x4/
 │       ├── tinghuye/                ← earlier from-scratch reconstruction scripts, kept for reference
 │       └── Mueller_calculation_36_images_method.py  ← reference-paper's canonical 36-image method
 ├── Data/                       ← captured images, organized Data/<date>/<sample-type>/<sample> (gitignored)
+├── RESULT/                     ← every output from every tool below, in one place (gitignored) -- see "RESULT/" section
 ├── angle_subset_comparison/    ← single-sample angle-subset vs. theory comparison (see below)
 │   ├── 3x3/                       ← for 3x3 captures
 │   └── 4x4/                       ← for 4x4 discrete captures
@@ -113,21 +120,25 @@ modifies, anything under `Measuremt_ script/`.
   air, a polarizer, a QWP, tissue — since the sample's identity never
   enters the code. `main.py` is the one file you run for a single capture;
   `average_rounds.py` aggregates several repeat rounds of the same sample
-  into a mean and standard deviation. `validate_against_theory.py` checks
-  reconstructions against known-theory samples (air, lp, qwp). See its
-  `README.md` for a full physics primer (assuming no prior polarimetry
-  background) and a function-by-function walkthrough. Results (from
-  `main.py`, `average_rounds.py`, and `validate_against_theory.py`) are
-  saved under `Results/`, mirroring the same `<date>/<sample-type>/<sample>`
-  path each run has under `Data/`, so the same sample name captured on a
-  different date never overwrites an earlier result.
+  into a mean and standard deviation; `validate_against_theory.py` checks
+  reconstructions against known-theory samples (air, lp, qwp); `fit_calibration.py`
+  numerically fits the polarizer extinction ratio from an air capture,
+  conditional on `validate_against_theory.py` showing air deviating from
+  identity by more than noise. See its `README.md` for a full physics
+  primer (assuming no prior polarimetry background), the recommended
+  run order across all four scripts, and a function-by-function
+  walkthrough.
 
 - **`own_code/DISCRETE/4x4/`** — the full 4×4 counterpart for
   `discreate_angle/`'s discrete-angle acquisition: same architecture, same
-  usage pattern (`main.py` / `average_rounds.py` / `validate_against_theory.py`),
-  but models the rig's fixed-polarizer + rotating-QWP generator/analyzer
-  instead, so it can also recover the circular-polarization-coupled entries
-  a 3×3 measurement cannot see.
+  usage pattern (`main.py` / `average_rounds.py` / `validate_against_theory.py` /
+  `fit_calibration.py`), but models the rig's fixed-polarizer +
+  rotating-QWP generator/analyzer instead, so it can also recover the
+  circular-polarization-coupled entries a 3×3 measurement cannot see. Also
+  has `polar_decomposition.py`: reduces a raw 16-number Mueller matrix to
+  four physically meaningful diagnostics (diattenuation, polarizance,
+  a depolarization index, and an estimated retardance), computed
+  automatically by `main.py` for every reconstruction.
 
   `own_code/DISCRETE/3x3/` and `own_code/DISCRETE/4x4/` are deliberately
   independent — no shared files, each with its own complete copy of the
@@ -145,7 +156,32 @@ modifies, anything under `Measuremt_ script/`.
   `image_loader.py`: it reads each frame's actual polled angle from
   `Logs/experiment_log.csv` (skipping any frame logged `FAILED`, or a
   `SUCCESS` row with no matching image file) rather than parsing it from
-  the filename. See its `README.md` for the full comparison.
+  the filename. Has `main.py`, `validate_against_theory.py`, and
+  `fit_calibration.py` (no `average_rounds.py` — continuous captures
+  aren't organized into repeat rounds the same way discrete ones are). See
+  its `README.md` for the full comparison.
+
+- **`own_code_reflection/`** — the same reconstruction pipeline
+  (`image_loader.py`/`mueller_forward_model.py`/`solve_mueller.py`/
+  `main.py`/`average_rounds.py`/`fit_calibration.py`/`polar_decomposition.py`
+  are byte-for-byte copies of the matching `own_code/` files, since the
+  empirical least-squares reconstruction never looks at what the sample
+  physically is — only at known PSG/PSA angles and measured intensities,
+  so it's identical whether the sample transmits or reflects light) but
+  for **reflective** samples (a mirror, bare silicon, or a silicon wafer
+  with a thin SiO2 layer) instead of transmissive ones. Mirrors
+  `own_code/`'s `DISCRETE/3x3/`, `DISCRETE/4x4/`, `CONTINOUS/4x4/`
+  structure exactly. What's genuinely new here: `reflection_theory.py`
+  (Fresnel reflection at a single interface, or the Airy thin-film formula
+  for one film on a substrate, converted to a Mueller matrix), and
+  `theoretical_mueller.py`/`validate_against_theory.py` (prompts you for
+  each sample's real physical parameters — wavelength, angle of incidence,
+  material indices, film thickness — at the terminal, logs them to an
+  editable CSV, and reports both the Frobenius-norm error and the mean
+  squared error, MSE, against the reconstructed matrix). See its own
+  `README.md` and each mode subfolder's `README.md` for the full physics
+  writeup and required physical bench setup (the camera arm must be
+  folded to the reflected beam's angle) and basis-alignment caveat.
 
 - **`tinghuye/`** — earlier from-scratch reconstruction scripts (3×3 and
   4×4, built from a fixed small angle set, plus a theory-vs-experiment
@@ -164,6 +200,51 @@ modifies, anything under `Measuremt_ script/`.
   Based on: S. Obando-Vasquez, A. Doblas, and C. Trujillo, *"Apparatus and
   method to estimate the Mueller matrix in bright-field microscopy,"*
   Applied Optics (2021).
+
+### `RESULT/`
+
+Every script under `own_code/` and `own_code_reflection/` — `main.py`,
+`average_rounds.py`, `validate_against_theory.py`, `fit_calibration.py`,
+`theoretical_mueller.py` (reflection only) — saves its output here, in one
+shared, systematically organized root, instead of a scattered `Results/`
+folder next to each individual script. Created automatically the first
+time anything writes to it; you never need to create it yourself, and
+(like `Data/`) it's gitignored — disposable, regenerable output, not
+something to commit.
+
+```
+RESULT/
+├── transmission/
+│   ├── 3x3/              (own_code/DISCRETE/3x3/'s output)
+│   ├── 4x4/              (own_code/DISCRETE/4x4/'s output)
+│   └── continuous_4x4/   (own_code/CONTINOUS/4x4/'s output)
+└── reflection/
+    ├── 3x3/              (own_code_reflection/DISCRETE/3x3/'s output)
+    ├── 4x4/              (own_code_reflection/DISCRETE/4x4/'s output)
+    └── continuous_4x4/   (own_code_reflection/CONTINOUS/4x4/'s output)
+```
+
+Each of those six leaf folders has the same internal subfolders:
+
+```
+<transmission-or-reflection>/<mode>/
+├── reconstructions/<date>/<sample>/                <- main.py
+├── multi_round/<date>/<sample>_multi_round/        <- average_rounds.py (not in continuous_4x4/)
+├── validation_against_theory/                      <- validate_against_theory.py
+├── calibration_fit/                                <- fit_calibration.py
+└── theoretical_matrices/                           <- theoretical_mueller.py (reflection only)
+```
+
+Every `validate_against_theory.py` also checks here first: if `main.py`
+already reconstructed a given sample with the exact same
+`extinction_ratio`/`retardance_deg` you're about to use, it reuses that
+saved reconstruction instead of redoing it from raw images — falling back
+to a fresh reconstruction on any mismatch or if it isn't there yet.
+
+Calibration/theory *log* files (`.last_calibration.json`,
+`.calibration_log.csv`, `.theory_log.csv`) are **not** under `RESULT/` —
+they stay next to each script that reads/writes them, since they're
+prompt-history/state rather than "results" you'd review or share.
 
 ### `control/Measuremt_ script/check_config_sync.py`
 
@@ -198,6 +279,14 @@ after any hardware change.
      `RUN_DIRECTORY` at the run folder directly (it reads `Images/`,
      `Logs/experiment_log.csv`, and `Config/experiment_config.json` from
      wherever that folder is — no renaming/copying step required).
+   - **Reflective sample** (mirror, bare/coated wafer) in any of the three
+     modes above: same acquisition scripts, but the bench must be
+     physically folded so the camera arm sits at the reflected beam's
+     angle, and you run the matching `matrix/own_code_reflection/...`
+     pipeline instead of `own_code/` — see `own_code_reflection/README.md`
+     for the full workflow (it also needs you to compute a *theoretical*
+     Mueller matrix from real physical parameters, which `own_code/`'s
+     transmissive samples don't require).
 
    New to the physics behind any of this? Start with the "Physics
    background, from zero" section in

@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 **/Data/
 **/Results/
+/RESULT/
 .last_calibration.json
 .calibration_log.csv
+.theory_log.csv
 .claude/settings.local.json

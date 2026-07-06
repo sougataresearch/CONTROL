@@ -145,7 +145,7 @@ RESULT_ROOT = Path(r"C:\COMPARE_CASES\RESULT")
 
 
 def default_output_directory(run_dir: Path) -> Path:
-    return RESULT_ROOT / "transmission" / "4x4" / "reconstructions" / _date_relative_path(run_dir)
+    return RESULT_ROOT / "reflection" / "4x4" / "reconstructions" / _date_relative_path(run_dir)
 
 
 def _git_commit_hash() -> str:

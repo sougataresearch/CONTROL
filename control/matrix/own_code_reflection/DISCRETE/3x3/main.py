@@ -1,5 +1,5 @@
-"""Single entry point for the 4x4 Mueller matrix pipeline: load a run's
-images, reconstruct its 4x4 Mueller matrix, and save every output
+"""Single entry point for the 3x3 Mueller matrix pipeline: load a run's
+images, reconstruct its 3x3 Mueller matrix, and save every output
 (per-element maps, an overview plot, the mean matrix, and fit diagnostics)
 to disk.
 
@@ -7,20 +7,19 @@ This is the only file you need to run. It imports image_loader.py and
 solve_mueller.py from this same folder -- see README.md (in this folder)
 for what each one does and the physics behind them.
 
-To run: edit RUN_DIRECTORY below to point at whatever 4x4 run you want to
+To run: edit RUN_DIRECTORY below to point at whatever 3x3 run you want to
 process (it does not need to live under this project at all), then just run
 this file:
 
     python main.py
 
-You will be prompted in the terminal for the polarizer extinction ratio and
-the QWP retardance (press Enter on either to accept the suggested default
--- the ideal values, 0 and 90, the first time; whatever you last used
-after that, remembered in .last_calibration.json next to this file). Pass
---extinction/--retardance on the command line instead to skip the prompts
-for a one-off/scripted run:
+You will be prompted in the terminal for the polarizer extinction ratio
+(press Enter to accept the suggested default -- the ideal value, 0, the
+first time; whatever you last used after that, remembered in
+.last_calibration.json next to this file). Pass --extinction on the
+command line instead to skip the prompt for a one-off/scripted run:
 
-    python main.py <run_directory> [--out OUTPUT_DIR] [--extinction E] [--retardance R]
+    python main.py <run_directory> [--out OUTPUT_DIR] [--extinction E]
 
 CLI arguments also override RUN_DIRECTORY/OUTPUT_DIRECTORY without editing
 the file.
@@ -72,26 +71,24 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from image_loader import load_run
-from polar_decomposition import decompose
-from solve_mueller import MuellerResult4x4, reconstruct
+from solve_mueller import MuellerResult3x3, reconstruct
 
 # ---------------------------------------------------------------------------
-# EDIT THIS to point at the 4x4 run you want to process. Any folder that
-# contains Images/ and Config/experiment_config.json (mode "4x4", with
-# fixed_angles for PSG_Polarizer/PSA_Analyzer) works -- it does not need to
-# be inside this project or on the same drive.
+# EDIT THIS to point at the 3x3 run you want to process. Any folder that
+# contains Images/ and Config/experiment_config.json (mode "3x3") works --
+# it does not need to be inside this project or on the same drive.
 # ---------------------------------------------------------------------------
-RUN_DIRECTORY = r"G:\control\Data\03072026\qwp\qwp90"
+RUN_DIRECTORY = r"C:\COMPARE_CASES\Data\02072026\air"
 
 # Where results are saved. None = a Results/<run folder name> subfolder next
 # to this script, independent of wherever RUN_DIRECTORY actually is.
 OUTPUT_DIRECTORY = None
 # ---------------------------------------------------------------------------
 
-# Remembers the last extinction ratio/retardance you actually used (typed
-# at the prompt, or passed via --extinction/--retardance), so the next
-# run's prompt suggests that instead of resetting to the ideal default
-# every time. Local to this machine -- not committed to git.
+# Remembers the last extinction ratio you actually used (typed at the
+# prompt, or passed via --extinction), so the next run's prompt suggests
+# that instead of resetting to the ideal default every time. Local to this
+# machine -- not committed to git (see ../../../.gitignore).
 _CALIBRATION_STATE_PATH = Path(__file__).resolve().parent / ".last_calibration.json"
 
 
@@ -109,19 +106,18 @@ def _save_last_calibration(values: dict) -> None:
 # Full history of every calibration value ever used, one row per run -- unlike
 # .last_calibration.json above (which only remembers the single most recent
 # value, for the next prompt's suggested default), this lets you look back and
-# answer "what extinction ratio/retardance was in effect for a specific past
-# capture?" Local to this machine -- not committed to git.
+# answer "what extinction ratio was in effect for a specific past capture?"
+# Local to this machine -- not committed to git (see ../../../.gitignore).
 _CALIBRATION_LOG_PATH = Path(__file__).resolve().parent / ".calibration_log.csv"
 
 
-def _append_calibration_log(run_dir: Path, extinction_ratio: float, retardance_deg: float) -> None:
+def _append_calibration_log(run_dir: Path, extinction_ratio: float) -> None:
     is_new = not _CALIBRATION_LOG_PATH.exists()
     with open(_CALIBRATION_LOG_PATH, "a", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         if is_new:
-            writer.writerow(["timestamp", "run_directory", "extinction_ratio", "retardance_deg"])
-        writer.writerow([datetime.now().isoformat(timespec="seconds"), run_dir,
-                          extinction_ratio, retardance_deg])
+            writer.writerow(["timestamp", "run_directory", "extinction_ratio"])
+        writer.writerow([datetime.now().isoformat(timespec="seconds"), run_dir, extinction_ratio])
 
 
 _DATE_DIR_RE = re.compile(r"^\d{8}$")
@@ -145,7 +141,7 @@ RESULT_ROOT = Path(r"C:\COMPARE_CASES\RESULT")
 
 
 def default_output_directory(run_dir: Path) -> Path:
-    return RESULT_ROOT / "transmission" / "4x4" / "reconstructions" / _date_relative_path(run_dir)
+    return RESULT_ROOT / "reflection" / "3x3" / "reconstructions" / _date_relative_path(run_dir)
 
 
 def _git_commit_hash() -> str:
@@ -166,10 +162,9 @@ def _git_commit_hash() -> str:
 def ask_float(prompt: str, default: float) -> float:
     """Ask for a numeric value, showing ``default`` in brackets; press Enter
     (blank input) to accept it as-is. Loops until a parseable number is
-    entered. Used for extinction_ratio/retardance_deg, since these are real,
-    per-optic calibration numbers the operator should confirm every run
-    rather than silently inheriting whatever default happens to be in this
-    file."""
+    entered. Used for extinction_ratio, since that's a real, per-optic
+    calibration number the operator should confirm every run rather than
+    silently inheriting whatever default happens to be in this file."""
 
     while True:
         text = input(f"{prompt} [{default:g}]: ").strip()
@@ -181,8 +176,8 @@ def ask_float(prompt: str, default: float) -> float:
             print("Enter a numeric value.")
 
 
-def save_outputs(result: MuellerResult4x4, out_dir: Path, run_dir: Path,
-                  extinction_ratio: float, retardance_deg: float) -> None:
+def save_outputs(result: MuellerResult3x3, out_dir: Path, run_dir: Path,
+                  extinction_ratio: float) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     np.save(out_dir / "mueller_matrix_normalized.npy", result.matrix)
@@ -193,42 +188,27 @@ def save_outputs(result: MuellerResult4x4, out_dir: Path, run_dir: Path,
     # made with the calibration it's about to use, before reusing it instead
     # of redoing the reconstruction from scratch.
     (out_dir / "calibration_used.json").write_text(
-        json.dumps({"extinction_ratio": extinction_ratio, "retardance_deg": retardance_deg}, indent=2),
-        encoding="utf-8",
+        json.dumps({"extinction_ratio": extinction_ratio}, indent=2), encoding="utf-8",
     )
-
-    per_pixel = decompose(result.matrix)
-    mean_decomposition = decompose(result.matrix_mean)
-    np.save(out_dir / "diattenuation_map.npy", per_pixel.diattenuation)
-    np.save(out_dir / "polarizance_map.npy", per_pixel.polarizance)
-    np.save(out_dir / "depolarization_index_map.npy", per_pixel.depolarization_index)
-    np.save(out_dir / "retardance_deg_map.npy", per_pixel.retardance_deg)
 
     np.set_printoptions(precision=4, suppress=True)
     with open(out_dir / "summary.txt", "w", encoding="utf-8") as fh:
-        fh.write("Mode: 4x4\n")
+        fh.write("Mode: 3x3\n")
         fh.write(f"System matrix condition number: {result.condition_number:.3f}\n")
         fh.write(f"Mean fit residual (RMS): {result.residual_rms.mean():.6f}\n")
         fh.write("Mean Mueller matrix (spatial average, normalized by m00):\n")
         fh.write(np.array2string(result.matrix_mean))
         fh.write("\n\n")
-        fh.write("--- Polar decomposition (from the mean matrix; see polar_decomposition.py) ---\n")
-        fh.write(f"Diattenuation: {float(mean_decomposition.diattenuation):.4f}\n")
-        fh.write(f"Polarizance: {float(mean_decomposition.polarizance):.4f}\n")
-        fh.write(f"Depolarization index: {float(mean_decomposition.depolarization_index):.4f}\n")
-        fh.write(f"Estimated retardance (deg): {float(mean_decomposition.retardance_deg):.4f} "
-                 "(exact only if depolarization index is close to 1 -- see polar_decomposition.py)\n")
-        fh.write("\n--- Provenance ---\n")
+        fh.write("--- Provenance ---\n")
         fh.write(f"Generated: {datetime.now().isoformat(timespec='seconds')}\n")
         fh.write(f"Git commit: {_git_commit_hash()}\n")
         fh.write(f"Source run: {run_dir}\n")
         fh.write(f"Extinction ratio: {extinction_ratio}\n")
-        fh.write(f"Retardance (deg): {retardance_deg}\n")
 
-    fig, axes = plt.subplots(4, 4, figsize=(12, 12))
+    fig, axes = plt.subplots(3, 3, figsize=(9, 9))
     im = None
-    for i in range(4):
-        for j in range(4):
+    for i in range(3):
+        for j in range(3):
             ax = axes[i, j]
             im = ax.imshow(result.matrix[:, :, i, j], cmap="RdBu_r", vmin=-1, vmax=1)
             ax.set_xticks([])
@@ -237,7 +217,7 @@ def save_outputs(result: MuellerResult4x4, out_dir: Path, run_dir: Path,
     fig.subplots_adjust(right=0.88)
     cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
     fig.colorbar(im, cax=cbar_ax)
-    fig.suptitle("Recovered 4x4 Mueller matrix (per pixel, normalized)")
+    fig.suptitle("Recovered 3x3 Mueller matrix (per pixel, normalized)")
     fig.savefig(out_dir / "mueller_matrix_overview.png", dpi=200)
     plt.close(fig)
 
@@ -247,20 +227,6 @@ def save_outputs(result: MuellerResult4x4, out_dir: Path, run_dir: Path,
     fig2.colorbar(im2, ax=ax2)
     fig2.savefig(out_dir / "residual_rms.png", dpi=200)
     plt.close(fig2)
-
-    fig3, axes3 = plt.subplots(1, 3, figsize=(14, 4.2))
-    panels = [
-        (per_pixel.diattenuation, "Diattenuation", 0.0, 1.0),
-        (per_pixel.polarizance, "Polarizance", 0.0, 1.0),
-        (per_pixel.depolarization_index, "Depolarization index", 0.0, 1.0),
-    ]
-    for ax, (data, title, vmin, vmax) in zip(axes3, panels):
-        im3 = ax.imshow(data, cmap="viridis", vmin=vmin, vmax=vmax)
-        ax.set_title(title, fontsize=10)
-        fig3.colorbar(im3, ax=ax, fraction=0.046, pad=0.04)
-    fig3.suptitle("Polar decomposition (per pixel)")
-    fig3.savefig(out_dir / "polar_decomposition.png", dpi=200)
-    plt.close(fig3)
 
 
 def main() -> None:
@@ -273,9 +239,6 @@ def main() -> None:
     parser.add_argument("--extinction", type=float, default=None,
                          help="Polarizer extinction ratio Imin/Imax; omit to be "
                               "prompted for it interactively (suggested default: ideal, 0)")
-    parser.add_argument("--retardance", type=float, default=None,
-                         help="QWP retardance in degrees; omit to be prompted for it "
-                              "interactively (suggested default: ideal, 90)")
     args = parser.parse_args()
 
     run_dir = Path(args.run_directory or RUN_DIRECTORY)
@@ -284,32 +247,19 @@ def main() -> None:
     extinction_ratio = args.extinction if args.extinction is not None else ask_float(
         "Polarizer extinction ratio Imin/Imax", last_calibration.get("extinction_ratio", 0.0)
     )
-    retardance_deg = args.retardance if args.retardance is not None else ask_float(
-        "QWP retardance in degrees", last_calibration.get("retardance_deg", 90.0)
-    )
-    _save_last_calibration({"extinction_ratio": extinction_ratio, "retardance_deg": retardance_deg})
-    _append_calibration_log(run_dir, extinction_ratio, retardance_deg)
+    _save_last_calibration({"extinction_ratio": extinction_ratio})
+    _append_calibration_log(run_dir, extinction_ratio)
 
     run = load_run(run_dir)
-    result = reconstruct(run, extinction_ratio=extinction_ratio, retardance_deg=retardance_deg)
-    save_outputs(result, out_dir, run_dir, extinction_ratio, retardance_deg)
+    result = reconstruct(run, extinction_ratio=extinction_ratio)
+    save_outputs(result, out_dir, run_dir, extinction_ratio)
 
     np.set_printoptions(precision=4, suppress=True)
-    print(f"Mode: 4x4, images used: {len(run.files)}")
-    print(f"Fixed angles: {run.fixed_angles}")
+    print(f"Mode: 3x3, images used: {len(run.files)}")
     print(f"System matrix condition number: {result.condition_number:.3f}")
     print(f"Mean fit residual (RMS): {result.residual_rms.mean():.6f}")
     print("Mean Mueller matrix (normalized by m00):")
     print(result.matrix_mean)
-
-    mean_decomposition = decompose(result.matrix_mean)
-    print("Polar decomposition (from the mean matrix):")
-    print(f"  Diattenuation: {float(mean_decomposition.diattenuation):.4f}")
-    print(f"  Polarizance: {float(mean_decomposition.polarizance):.4f}")
-    print(f"  Depolarization index: {float(mean_decomposition.depolarization_index):.4f}")
-    print(f"  Estimated retardance (deg): {float(mean_decomposition.retardance_deg):.4f} "
-          "(exact only if depolarization index is close to 1)")
-
     print(f"Saved outputs to {out_dir}")
 
     if not re.search(r"_round\d+$", run_dir.name, re.IGNORECASE):

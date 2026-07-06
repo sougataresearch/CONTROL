@@ -84,15 +84,18 @@ after that (remembered in `.last_calibration.json` next to `main.py`, not
 committed to git).
 
 Results are saved to
-`own_code/CONTINOUS/4x4/Results/<date>/.../<run folder name>/` by default —
-if `RUN_DIRECTORY` sits under a dated `Data/<8-digit-date>/...` layout, that
-same date/sample-type path is mirrored under `Results/` so the same sample
-name captured on a different date doesn't collide with an earlier result;
-otherwise it falls back to just `Results/<run folder name>/` (the common
-case for continuous captures, which aren't usually organized by date). This
-is deliberately *not* inside the data folder either way, since
-`RUN_DIRECTORY` may point somewhere else entirely. Set `OUTPUT_DIRECTORY` at
-the top of `main.py` if you want them somewhere specific instead.
+`C:\COMPARE_CASES\RESULT\transmission\continuous_4x4\reconstructions\<date>\.../<run
+folder name>\` by default — if `RUN_DIRECTORY` sits under a dated
+`Data/<8-digit-date>/...` layout, that same date/sample-type path is
+mirrored under that folder so the same sample name captured on a different
+date doesn't collide with an earlier result; otherwise it falls back to
+just `RESULT/transmission/continuous_4x4/reconstructions/<run folder
+name>/` (the common case for continuous captures, which aren't usually
+organized by date). `RESULT/` is a single shared output root for every tool
+in this whole project (see the root README) — it's created automatically
+the first time anything writes to it; you never need to create it yourself.
+Set `OUTPUT_DIRECTORY` at the top of `main.py` if you want a specific run's
+output somewhere else instead.
 
 You can also pass everything as command-line arguments instead of editing
 the file or answering the prompts:
@@ -109,14 +112,15 @@ python main.py "G:\control\Data\continuous\sample2" --out "G:\some\other\folder"
 has a small `__main__` for a quick print-only check without saving any
 files: `python solve_mueller.py <run_directory>`.
 
-## What gets written to `Results/<date>/.../<run folder name>/`
+## What gets written to `RESULT/transmission/continuous_4x4/reconstructions/<date>/.../<run folder name>/`
 
 | File | Contents |
 |---|---|
 | `mueller_matrix_normalized.npy` | `(H, W, 4, 4)` array, every pixel's Mueller matrix, normalized so `m00 = 1` |
 | `mueller_matrix_raw.npy` | Same shape, before the `m00` normalization |
 | `residual_rms.npy` | `(H, W)` per-pixel fit error — how well the reconstructed matrix explains the measured intensities |
-| `summary.txt` | Condition number, mean residual, and the spatially-averaged Mueller matrix, as text |
+| `calibration_used.json` | `{"extinction_ratio": ..., "retardance_deg": ...}` — lets `validate_against_theory.py` verify it can safely reuse this reconstruction instead of redoing it (see below) |
+| `summary.txt` | Condition number, mean residual, and the spatially-averaged Mueller matrix, plus provenance (git commit, timestamp, source run, calibration), as text |
 | `mueller_matrix_overview.png` | 4x4 grid of grayscale maps, one per matrix element |
 | `residual_rms.png` | Heatmap of the residual, for spotting bad frames/regions at a glance |
 
@@ -142,6 +146,19 @@ files: `python solve_mueller.py <run_directory>`.
 
 3. **`main.save_outputs(result, out_dir)`**
    Writes everything in the table above.
+
+## Which file do I run, and in what order?
+
+`main.py` is the only file required for a single capture. There's no
+`average_rounds.py` in this folder (continuous captures aren't organized
+into repeat rounds the same way discrete ones are). The other two scripts
+are optional, used in this order as your workflow matures:
+
+| Order | Script | When to use it |
+|---|---|---|
+| 1 | `main.py` | Every single capture. Reconstructs and saves one run's Mueller matrix. |
+| 2 | `validate_against_theory.py` | You have a reference sample with a *known* theoretical answer (air, an ideal linear polarizer, or an ideal QWP at a known angle). Edit `SAMPLE_DIRECTORIES`, then `python validate_against_theory.py`. Same Frobenius-norm calculation as `../../DISCRETE/4x4/README.md` describes in full (worked example there) -- `N = 16` here too. |
+| 3 (conditional) | `fit_calibration.py` | Only if step 2 showed your air sample deviating from identity by more than noise. Numerically searches (coordinate descent) for the `(extinction_ratio, retardance_deg)` pair that minimizes that deviation. Edit `AIR_DIRECTORY`, then `python fit_calibration.py`. See `../../DISCRETE/4x4/README.md`'s fuller explanation -- identical method, applied to a continuous-rotation air capture instead of a discrete one. Can't fix a `ZERO_OFFSET` motor-zero misalignment; that's a physical recalibration on the acquisition side. |
 
 ## Ideal vs. calibrated optics
 

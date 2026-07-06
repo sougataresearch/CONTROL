@@ -137,15 +137,19 @@ first time you run this, then whatever you entered last time after that
 (remembered in `.last_calibration.json` next to `main.py`, not committed to
 git).
 
-Results are saved to `own_code/3x3/Results/<date>/.../<run folder name>/` by
-default -- the run directory's own date/sample-type path is mirrored under
-`Results/` (e.g. `Data/03072026/lp/lp30` -> `Results/03072026/lp/lp30/`), so
-the same sample name captured on a different date doesn't collide with or
-overwrite an earlier result. If `RUN_DIRECTORY` isn't under a dated
-`Data/<8-digit-date>/...` layout, it falls back to just `Results/<run folder
-name>/`. This is deliberately *not* inside the data folder either way, since
-`RUN_DIRECTORY` may point somewhere else entirely. Set `OUTPUT_DIRECTORY` at
-the top of `main.py` if you want them somewhere specific instead.
+Results are saved to
+`C:\COMPARE_CASES\RESULT\transmission\3x3\reconstructions\<date>\.../<run
+folder name>\` by default -- the run directory's own date/sample-type path
+is mirrored under that folder (e.g. `Data/03072026/lp/lp30` ->
+`RESULT/transmission/3x3/reconstructions/03072026/lp/lp30/`), so the same
+sample name captured on a different date doesn't collide with or overwrite
+an earlier result. If `RUN_DIRECTORY` isn't under a dated
+`Data/<8-digit-date>/...` layout, it falls back to just
+`RESULT/transmission/3x3/reconstructions/<run folder name>/`. `RESULT/` is a
+single shared output root for every tool in this whole project (see the root
+README) -- it's created automatically the first time anything writes to it;
+you never need to create it yourself. Set `OUTPUT_DIRECTORY` at the top of
+`main.py` if you want a specific run's output somewhere else instead.
 
 You can also pass everything as command-line arguments instead of editing
 the file or answering the prompt, e.g. for scripting multiple runs without
@@ -167,14 +171,15 @@ If you point this at a run whose `experiment_config.json` says `"mode":
 "4x4"`, it will refuse with a clear error instead of silently misreading the
 filenames -- use `own_code/4x4` for that run instead.
 
-## What gets written to `Results/<date>/.../<run folder name>/`
+## What gets written to `RESULT/transmission/3x3/reconstructions/<date>/.../<run folder name>/`
 
 | File | Contents |
 |---|---|
 | `mueller_matrix_normalized.npy` | `(H, W, 3, 3)` array, every pixel's Mueller matrix, normalized so `m00 = 1` |
 | `mueller_matrix_raw.npy` | Same shape, before the `m00` normalization |
 | `residual_rms.npy` | `(H, W)` per-pixel fit error -- how well the reconstructed matrix explains the measured intensities |
-| `summary.txt` | Condition number, mean residual, and the spatially-averaged Mueller matrix, as text |
+| `calibration_used.json` | `{"extinction_ratio": ...}` -- lets `validate_against_theory.py` verify it can safely reuse this reconstruction instead of redoing it (see below) |
+| `summary.txt` | Condition number, mean residual, the spatially-averaged Mueller matrix, and provenance (git commit, timestamp, source run, calibration), as text |
 | `mueller_matrix_overview.png` | 3x3 grid of grayscale maps, one per matrix element |
 | `residual_rms.png` | Heatmap of the residual, for spotting bad pixels/regions at a glance |
 
@@ -200,6 +205,64 @@ filenames -- use `own_code/4x4` for that run instead.
 
 3. **`main.save_outputs(result, out_dir)`**
    Writes everything in the table above.
+
+## Which file do I run, and in what order?
+
+`main.py` is the only file required for a single capture. The other four
+scripts are optional, used in this order as your workflow matures:
+
+| Order | Script | When to use it |
+|---|---|---|
+| 1 | `main.py` | Every single capture. Reconstructs and saves one run's Mueller matrix. |
+| 2 | `average_rounds.py` | You captured >= 3 repeat rounds of the *same* sample (see `../../NAMING.md`). Reconstructs each round independently (identical math to `main.py`), then reports the mean and standard deviation *across rounds* -- this is the only place round-to-round repeatability (not just per-pixel noise) is measured. Edit `ROUND_DIRECTORIES` at the top, then `python average_rounds.py`. |
+| 3 | `validate_against_theory.py` | You have a reference sample with a *known* theoretical answer (air, or a linear polarizer at a known angle) and want to check the reconstruction against it. Edit `SAMPLE_DIRECTORIES`, then `python validate_against_theory.py` -- see "Checking against a known theoretical matrix" below for what it computes. |
+| 4 (conditional) | `fit_calibration.py` | Only if step 3 showed your air sample's reconstruction deviating from identity by more than noise. Numerically searches for the `extinction_ratio` value that minimizes that deviation, so you're not guessing it by hand. Edit `AIR_DIRECTORY`, then `python fit_calibration.py`. See "Calibrating from an air capture" below. |
+
+### Checking against a known theoretical matrix (`validate_against_theory.py`)
+
+For samples whose true Mueller matrix you already know -- air (should
+reconstruct to the identity matrix) or a linear polarizer at a known angle
+(should reconstruct to the textbook linear-polarizer formula) --
+`validate_against_theory.py` reconstructs each configured sample (reusing
+`main.py`'s saved reconstruction automatically if one already exists with
+matching `extinction_ratio`, otherwise redoing it from the raw images) and
+reports how far the reconstruction deviates from theory, using the
+**Frobenius norm** of the difference between the two matrices:
+
+```
+error = ||measured - theory||_F = sqrt( sum over every element of (measured_ij - theory_ij)^2 )
+```
+
+This is the exact same "distance between two matrices" calculation used
+throughout this project -- see the root README's full walkthrough (with a
+worked numeric example) of why this specific formula, and why it always
+ranks identically to Mean Squared Error (MSE): `Frobenius = sqrt(N) x RMSE`,
+where `N = 9` for a 3x3 matrix. It also prints each non-air sample's error as
+a multiple of air's own error ("2.3x air's baseline") -- if every sample's
+ratio is close to 1x, the deviation is a systematic PSG/PSA modeling issue
+(affecting every sample equally), not something specific to any one sample.
+
+### Calibrating from an air capture (`fit_calibration.py`)
+
+Air's true Mueller matrix is the identity matrix, with certainty -- there's
+no ambiguity to argue about, unlike a real sample. That makes it the ideal
+reference for tuning the one free physical parameter this pipeline has,
+`extinction_ratio`: `fit_calibration.py` reconstructs your air capture
+repeatedly with a range of candidate `extinction_ratio` values (a
+coarse-to-fine grid search, refining around whichever candidate currently
+gives the lowest error), and reports the value that makes the reconstruction
+closest to the identity matrix. If that improved value doesn't meaningfully
+reduce the error versus the ideal default (`0`), your air data is already
+consistent with an ideal polarizer and there's nothing to fix.
+
+**What this can't fix:** a PSG/PSA angle-zero misalignment (`ZERO_OFFSET`)
+is a physical motor calibration living in the *acquisition* side's
+`config.py` (found with its own `calibration.py`, under `Measuremt_
+script/discreate_angle/`) -- no amount of curve-fitting after the fact can
+correct for images captured at the wrong actual angle. If `fit_calibration.py`'s
+best achievable error is still well above your per-pixel noise floor (see
+`residual_rms` in `main.py`'s output), that's the more likely culprit, and
+the fix requires physically recalibrating the motor zero and recapturing.
 
 ## The physics
 

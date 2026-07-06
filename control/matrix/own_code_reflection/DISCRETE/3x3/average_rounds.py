@@ -190,7 +190,7 @@ def main() -> None:
     mean_matrix = stacked.mean(axis=0)
     std_matrix = stacked.std(axis=0, ddof=1) if len(round_dirs) > 1 else np.zeros_like(mean_matrix)
 
-    out_dir = (RESULT_ROOT / "transmission" / "3x3" / "multi_round"
+    out_dir = (RESULT_ROOT / "reflection" / "3x3" / "multi_round"
                / _date_relative_parent(round_dirs[0]) / f"{sample_name}_multi_round")
     out_dir.mkdir(parents=True, exist_ok=True)
 

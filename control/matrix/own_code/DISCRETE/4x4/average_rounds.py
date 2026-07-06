@@ -16,6 +16,12 @@ any individual round is reconstructed.
 To run: edit ROUND_DIRECTORIES below to list every round's folder, then:
 
     python average_rounds.py
+
+You will be prompted for the polarizer extinction ratio and QWP retardance
+(press Enter on either to accept the suggested default -- whatever was
+last used by this script or main.py in this same folder, remembered in
+.last_calibration.json), applied to every round so they're all
+reconstructed on an equal footing.
 """
 
 from __future__ import annotations
@@ -52,6 +58,8 @@ def _ensure_dependencies() -> None:
 
 _ensure_dependencies()
 
+import csv
+import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -73,10 +81,50 @@ ROUND_DIRECTORIES = [
 # Name for the aggregate output folder. None = derived from the first
 # round's folder name with a trailing "_roundN" stripped, e.g. "qwp30".
 SAMPLE_NAME = None
-
-EXTINCTION_RATIO = 0.0
-RETARDANCE_DEG = 90.0
 # ---------------------------------------------------------------------------
+
+RESULT_ROOT = Path(r"C:\COMPARE_CASES\RESULT")
+
+# Shared with main.py in this same folder, so "last used" reflects whichever
+# of the two scripts you ran most recently -- not committed to git.
+_CALIBRATION_STATE_PATH = Path(__file__).resolve().parent / ".last_calibration.json"
+_CALIBRATION_LOG_PATH = Path(__file__).resolve().parent / ".calibration_log.csv"
+
+
+def _load_last_calibration() -> dict:
+    try:
+        return json.loads(_CALIBRATION_STATE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_last_calibration(values: dict) -> None:
+    _CALIBRATION_STATE_PATH.write_text(json.dumps(values, indent=2), encoding="utf-8")
+
+
+def _append_calibration_log(extinction_ratio: float, retardance_deg: float) -> None:
+    is_new = not _CALIBRATION_LOG_PATH.exists()
+    with open(_CALIBRATION_LOG_PATH, "a", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        if is_new:
+            writer.writerow(["timestamp", "run_directory", "extinction_ratio", "retardance_deg"])
+        writer.writerow([datetime.now().isoformat(timespec="seconds"),
+                          "average_rounds (multiple)", extinction_ratio, retardance_deg])
+
+
+def ask_float(prompt: str, default: float) -> float:
+    """Ask for a numeric value, showing ``default`` in brackets; press Enter
+    (blank input) to accept it as-is. Loops until a parseable number is
+    entered."""
+
+    while True:
+        text = input(f"{prompt} [{default:g}]: ").strip()
+        if not text:
+            return default
+        try:
+            return float(text)
+        except ValueError:
+            print("Enter a numeric value.")
 
 
 def _default_sample_name(round_dirs: list) -> str:
@@ -120,12 +168,22 @@ def main() -> None:
     round_dirs = [Path(p) for p in ROUND_DIRECTORIES]
     sample_name = SAMPLE_NAME or _default_sample_name(ROUND_DIRECTORIES)
 
+    last_calibration = _load_last_calibration()
+    extinction_ratio = ask_float(
+        "Polarizer extinction ratio Imin/Imax", last_calibration.get("extinction_ratio", 0.0)
+    )
+    retardance_deg = ask_float(
+        "QWP retardance in degrees", last_calibration.get("retardance_deg", 90.0)
+    )
+    _save_last_calibration({"extinction_ratio": extinction_ratio, "retardance_deg": retardance_deg})
+    _append_calibration_log(extinction_ratio, retardance_deg)
+
     per_round_matrices = []
     per_round_conditions = []
     per_round_residuals = []
     for round_dir in round_dirs:
         run = load_run(round_dir)
-        result = reconstruct(run, extinction_ratio=EXTINCTION_RATIO, retardance_deg=RETARDANCE_DEG)
+        result = reconstruct(run, extinction_ratio=extinction_ratio, retardance_deg=retardance_deg)
         per_round_matrices.append(result.matrix_mean)
         per_round_conditions.append(result.condition_number)
         per_round_residuals.append(result.residual_rms.mean())
@@ -136,7 +194,7 @@ def main() -> None:
     mean_matrix = stacked.mean(axis=0)
     std_matrix = stacked.std(axis=0, ddof=1) if len(round_dirs) > 1 else np.zeros_like(mean_matrix)
 
-    out_dir = (Path(__file__).resolve().parent / "Results"
+    out_dir = (RESULT_ROOT / "transmission" / "4x4" / "multi_round"
                / _date_relative_parent(round_dirs[0]) / f"{sample_name}_multi_round")
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -159,8 +217,8 @@ def main() -> None:
         fh.write(f"Generated: {datetime.now().isoformat(timespec='seconds')}\n")
         fh.write(f"Git commit: {_git_commit_hash()}\n")
         fh.write(f"Round directories: {[str(d) for d in round_dirs]}\n")
-        fh.write(f"Extinction ratio: {EXTINCTION_RATIO}\n")
-        fh.write(f"Retardance (deg): {RETARDANCE_DEG}\n")
+        fh.write(f"Extinction ratio: {extinction_ratio}\n")
+        fh.write(f"Retardance (deg): {retardance_deg}\n")
 
     print(f"\nMean matrix across {len(round_dirs)} rounds:")
     print(mean_matrix)
