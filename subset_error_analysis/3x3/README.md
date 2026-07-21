@@ -17,8 +17,9 @@ identity, `lp<angle>` → ideal linear polarizer formula).
 
 Fully self-contained: its own copy of the rotation-sandwich physics, image
 loader, and theoretical-matrix formulas (matching
-`control/matrix/own_code/DISCRETE/3x3/`). It never imports from or writes
-into `control/` — `Data/` is only ever read.
+`control/matrix/own_code/DISCRETE/3x3/`). It never imports from `control/`,
+and only reads from `Data/` — results are written to the shared
+`RESULT/subset_error_analysis/3x3/` tree, not into `control/`.
 
 ## Running it
 
@@ -34,10 +35,11 @@ misnamed folder doesn't silently produce one fewer result with no warning.
 
 ## What gets written, per sample
 
-Results land in `Results/<date>/.../<sample>/`, mirroring the same
-date/sample-type path the run has under `Data/` (e.g.
-`Data/03072026/lp/lp30` → `Results/03072026/lp/lp30/`), so the same sample
-name captured on a different date never overwrites an earlier result.
+Results land under `C:\COMPARE_CASES\RESULT\subset_error_analysis\3x3\<date>\...\<sample>\`,
+mirroring the same date/sample-type path the run has under `Data/` (e.g.
+`Data/03072026/lp/lp30` → `RESULT/subset_error_analysis/3x3/03072026/lp/lp30/`),
+so the same sample name captured on a different date never overwrites an
+earlier result.
 
 - **`matrices.txt` / `matrices.json`** — the theoretical matrix, the full
   all-angles reconstruction, and every 9-image subset's actual reconstructed

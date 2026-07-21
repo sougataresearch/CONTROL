@@ -16,8 +16,9 @@ scanning many samples rather than one you point it at.
 
 Fully self-contained: its own copy of the rotation-sandwich physics, image
 loader, and theoretical-matrix formulas (matching
-`control/matrix/own_code/DISCRETE/3x3/`). It never imports from or writes
-into `control/` — `Data/` is only ever read.
+`control/matrix/own_code/DISCRETE/3x3/`). It never imports from `control/`,
+and only reads from `Data/` — results are written to the shared
+`RESULT/angle_subset_comparison/3x3/` tree, not into `control/`.
 
 ## Running it
 
@@ -31,10 +32,11 @@ python compare_subsets.py
 
 ## What gets written
 
-Results land in `Results/<date>/.../<sample>/`, mirroring the same
-date/sample-type path the run has under `Data/` (e.g.
-`Data/03072026/lp/lp30` → `Results/03072026/lp/lp30/`), so the same sample
-name captured on a different date never overwrites an earlier result.
+Results land under `C:\COMPARE_CASES\RESULT\angle_subset_comparison\3x3\<date>\...\<sample>\`,
+mirroring the same date/sample-type path the run has under `Data/` (e.g.
+`Data/03072026/lp/lp30` → `RESULT/angle_subset_comparison/3x3/03072026/lp/lp30/`),
+so the same sample name captured on a different date never overwrites an
+earlier result.
 
 - **`matrices.txt` / `matrices.json`** — the theoretical matrix, the full
   all-angles reconstruction, and every 9-image subset's actual reconstructed

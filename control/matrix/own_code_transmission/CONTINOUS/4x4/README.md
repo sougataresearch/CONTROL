@@ -112,6 +112,31 @@ python main.py "G:\control\Data\continuous\sample2" --out "G:\some\other\folder"
 has a small `__main__` for a quick print-only check without saving any
 files: `python solve_mueller.py <run_directory>`.
 
+### Dark-current subtraction
+
+Every camera sensor reads out a nonzero baseline even with no real signal
+hitting it (thermal/read noise, ADC bias, hot pixels). Left uncorrected,
+that constant offset biases every reconstructed Mueller matrix element,
+worst where the true signal is small (e.g. near-crossed polarizers).
+
+To correct for it: after capturing this run's frames (same exposure/gain,
+same camera settings), block all light reaching the camera -- either turn
+off the light source, or remove/cover all optical components. Both are
+equally valid: dark current depends on the sensor and exposure, not on
+what's in the beam path. Capture one or more frames this way and save them
+as image files (any names) into a `Dark/` subfolder next to `Images/`, i.e.
+`<run_directory>/Dark/`.
+
+If `Dark/` is present, `image_loader.py` averages every frame inside it
+into a single reference and subtracts it (clipped at 0) from every image
+before reconstruction -- several dark frames are worth capturing since
+averaging them reduces the reference's own read noise. If `Dark/` is
+absent, `main.py` prints a warning explaining this and proceeds on raw
+intensities, exactly as before this feature existed -- nothing breaks on
+old runs that don't have a `Dark/` folder. Whether subtraction was applied,
+how many frames were averaged, and the mean dark level are all recorded in
+`summary.txt` and printed to the terminal.
+
 ## What gets written to `RESULT/transmission/continuous_4x4/reconstructions/<date>/.../<run folder name>/`
 
 | File | Contents |

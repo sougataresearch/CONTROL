@@ -76,7 +76,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from image_loader import load_run
+from image_loader import dark_reference_available, load_run
 from solve_mueller import reconstruct
 
 # ---------------------------------------------------------------------------
@@ -222,23 +222,30 @@ def _date_relative_path(path: Path) -> Path:
     return Path(path.name)
 
 
+def _format_matrix(m: np.ndarray) -> str:
+    return "\n".join("    [" + ", ".join(f"{v:+.4f}" for v in row) + "]" for row in m)
+
+
 @dataclass
 class _CachedResult:
     matrix: np.ndarray
     matrix_mean: np.ndarray
+    dark_subtracted: bool
 
 
 def _load_cached_reconstruction(sample_dir: Path, extinction_ratio: float):
     """If main.py already reconstructed this exact sample with this exact
-    extinction_ratio, reuse its saved output instead of redoing the
-    reconstruction from raw images -- solve_mueller.reconstruct() is
-    deterministic given the same images/extinction_ratio, so recomputing it
+    extinction_ratio AND dark-current status, reuse its saved output instead
+    of redoing the reconstruction from raw images -- solve_mueller.reconstruct()
+    is deterministic given the same images/extinction_ratio, so recomputing it
     here would just be duplicate work. Returns None (falls back to a fresh
-    reconstruction) if main.py hasn't been run for this sample, or was run
-    with a different extinction_ratio -- a stale/mismatched cache would
-    silently corrupt the comparison, so it's only reused on an exact match.
-    Assumes main.py used its default output location (Results/<date-relative-
-    path> next to main.py); a custom --out won't be found here."""
+    reconstruction) if main.py hasn't been run for this sample, was run with a
+    different extinction_ratio, or its dark-subtraction status no longer
+    matches this run's current state (e.g. a dark reference was added since) --
+    a stale/mismatched cache would silently corrupt the comparison, so it's
+    only reused on an exact match. Assumes main.py used its default output
+    location (Results/<date-relative-path> next to main.py); a custom --out
+    won't be found here."""
 
     cache_dir = (RESULT_ROOT / "transmission" / "3x3" / "reconstructions"
                  / _date_relative_path(sample_dir))
@@ -254,12 +261,15 @@ def _load_cached_reconstruction(sample_dir: Path, extinction_ratio: float):
         return None
     if cached_calibration.get("extinction_ratio") != extinction_ratio:
         return None
+    if cached_calibration.get("dark_subtracted") != dark_reference_available(sample_dir):
+        return None
 
     matrix = np.load(matrix_path)
     matrix_raw = np.load(raw_path)
     mean_raw = matrix_raw.mean(axis=(0, 1))
     matrix_mean = mean_raw / mean_raw[0, 0]
-    return _CachedResult(matrix=matrix, matrix_mean=matrix_mean)
+    return _CachedResult(matrix=matrix, matrix_mean=matrix_mean,
+                          dark_subtracted=cached_calibration["dark_subtracted"])
 
 
 def _git_commit_hash() -> str:
@@ -291,6 +301,7 @@ def main() -> None:
     base_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    matrix_blocks = []
     for sample_dir in SAMPLE_DIRECTORIES:
         sample_dir = Path(sample_dir)
         sample_name = sample_dir.name
@@ -298,12 +309,25 @@ def main() -> None:
 
         result = _load_cached_reconstruction(sample_dir, extinction_ratio)
         if result is not None:
+            dark_subtracted = result.dark_subtracted
             print(f"{sample_name}: reusing main.py's cached reconstruction (matching calibration)")
         else:
             run = load_run(sample_dir)
             result = reconstruct(run, extinction_ratio=extinction_ratio)
+            dark_subtracted = run.dark_subtracted
+        print(f"{sample_name}: dark-current subtraction "
+              f"{'applied' if dark_subtracted else 'NOT applied'}")
 
         mean_matrix_error = float(np.linalg.norm(result.matrix_mean - theory))
+        rmse = float(np.sqrt(np.mean((result.matrix_mean - theory) ** 2)))
+
+        matrix_blocks.append(
+            f"\n=== {sample_name} ===\n"
+            f"Theoretical Mueller matrix:\n{_format_matrix(theory)}\n"
+            f"Experimental Mueller matrix (mean):\n{_format_matrix(result.matrix_mean)}\n"
+            f"Deviation (RMS): {rmse:.6f}\n"
+        )
+
         diff = result.matrix - theory[None, None, :, :]
         per_pixel_error = np.sqrt((diff ** 2).sum(axis=(2, 3)))
 
@@ -335,14 +359,16 @@ def main() -> None:
         fig2.savefig(out_dir / "error_map.png", dpi=200)
         plt.close(fig2)
 
-        rows.append((sample_name, mean_matrix_error, float(per_pixel_error.mean())))
+        rows.append((sample_name, mean_matrix_error, float(per_pixel_error.mean()), dark_subtracted))
         print(f"{sample_name}: mean-matrix Frobenius error = {mean_matrix_error:.4f}, "
               f"mean per-pixel Frobenius error = {per_pixel_error.mean():.4f}")
 
     with open(base_dir / "summary.txt", "w", encoding="utf-8") as fh:
-        fh.write("sample      | mean-matrix Frobenius error | mean per-pixel Frobenius error\n")
-        for name, mean_err, pix_err in rows:
-            fh.write(f"{name:11s} | {mean_err:27.4f} | {pix_err:.4f}\n")
+        fh.write("sample      | mean-matrix Frobenius error | mean per-pixel Frobenius error | dark subtracted\n")
+        for name, mean_err, pix_err, dark_subtracted in rows:
+            fh.write(f"{name:11s} | {mean_err:27.4f} | {pix_err:.4f} | {dark_subtracted}\n")
+        fh.write("\n--- Per-sample Mueller matrices (mean-matrix comparison) ---\n")
+        fh.write("".join(matrix_blocks))
         fh.write("\n--- Provenance ---\n")
         fh.write(f"Generated: {datetime.now().isoformat(timespec='seconds')}\n")
         fh.write(f"Git commit: {_git_commit_hash()}\n")
@@ -353,7 +379,7 @@ def main() -> None:
     print()
     if air_row is not None and air_row[1] > 0:
         print("Comparing each sample's error against air's baseline error:")
-        for name, mean_err, _ in rows:
+        for name, mean_err, _, _ in rows:
             if name.lower() != "air":
                 print(f"  {name}: {mean_err:.4f}  ({mean_err / air_row[1]:.1f}x air's {air_row[1]:.4f})")
         print(

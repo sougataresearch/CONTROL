@@ -11,8 +11,9 @@ Answers, per sample and overall:
 
 This folder is fully self-contained: its own copy of the rotation-sandwich
 physics, image loader, and theoretical-matrix formulas. It does not import
-anything from control/ or angle_subset_comparison/, and never writes outside
-its own Results/ directory -- data under Data/ is only ever read.
+anything from control/ or angle_subset_comparison/. Results are written
+under the shared RESULT/subset_error_analysis/3x3/ tree (see RESULTS_DIR
+below) -- data under Data/ is only ever read.
 
 Usage:
     python analyze_subsets.py
@@ -85,7 +86,7 @@ MIN_UNIQUE_ANGLES = SUBSET_SIZE + 1
 
 EXTINCTION_RATIO = 0.0
 
-RESULTS_DIR = Path(__file__).resolve().parent / "Results"
+RESULTS_DIR = Path(r"C:\COMPARE_CASES\RESULT") / "subset_error_analysis" / "3x3"
 # ---------------------------------------------------------------------------
 
 

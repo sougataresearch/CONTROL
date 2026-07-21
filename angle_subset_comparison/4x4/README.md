@@ -27,8 +27,9 @@ to draw combinations from.
 
 Fully self-contained: its own copy of the fixed-polarizer + rotating-QWP
 rotation-sandwich physics, image loader, and theoretical-matrix formulas
-(matching `control/matrix/own_code/DISCRETE/4x4/`). It never imports from or
-writes into `control/` — `Data/` is only ever read.
+(matching `control/matrix/own_code/DISCRETE/4x4/`). It never imports from
+`control/`, and only reads from `Data/` — results are written to the shared
+`RESULT/angle_subset_comparison/4x4/` tree, not into `control/`.
 
 ## Running it
 
@@ -42,9 +43,10 @@ python compare_subsets_4x4.py
 
 ## What gets written
 
-Results land in `Results/<date>/.../<sample>/`, mirroring the same
-date/sample-type path the run has under `Data/`, so the same sample name
-captured on a different date never overwrites an earlier result.
+Results land under `C:\COMPARE_CASES\RESULT\angle_subset_comparison\4x4\<date>\...\<sample>\`,
+mirroring the same date/sample-type path the run has under `Data/`, so the
+same sample name captured on a different date never overwrites an earlier
+result.
 
 - **`matrices.txt` / `matrices.json`** — the theoretical matrix, the full
   all-angles reconstruction, and every 16-image subset's actual

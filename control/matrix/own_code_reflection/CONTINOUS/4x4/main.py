@@ -182,7 +182,7 @@ def ask_float(prompt: str, default: float) -> float:
 
 
 def save_outputs(result: MuellerResult4x4, out_dir: Path, run_dir: Path,
-                  extinction_ratio: float, retardance_deg: float) -> None:
+                  extinction_ratio: float, retardance_deg: float, run) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     np.save(out_dir / "mueller_matrix_normalized.npy", result.matrix)
@@ -193,7 +193,14 @@ def save_outputs(result: MuellerResult4x4, out_dir: Path, run_dir: Path,
     # made with the calibration it's about to use, before reusing it instead
     # of redoing the reconstruction from scratch.
     (out_dir / "calibration_used.json").write_text(
-        json.dumps({"extinction_ratio": extinction_ratio, "retardance_deg": retardance_deg}, indent=2),
+        json.dumps(
+            {
+                "extinction_ratio": extinction_ratio,
+                "retardance_deg": retardance_deg,
+                "dark_subtracted": run.dark_subtracted,
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
@@ -211,6 +218,14 @@ def save_outputs(result: MuellerResult4x4, out_dir: Path, run_dir: Path,
         fh.write(f"Source run: {run_dir}\n")
         fh.write(f"Extinction ratio: {extinction_ratio}\n")
         fh.write(f"Retardance (deg): {retardance_deg}\n")
+        if run.dark_subtracted:
+            fh.write(
+                f"Dark-current subtraction: applied ({run.dark_frame_count} frame(s) "
+                f"averaged from {run_dir / 'Dark'}, mean dark level "
+                f"{run.dark_level_mean:.4f})\n"
+            )
+        else:
+            fh.write("Dark-current subtraction: NOT applied (no Dark/ folder found)\n")
 
     fig, axes = plt.subplots(4, 4, figsize=(12, 12))
     im = None
@@ -266,11 +281,16 @@ def main() -> None:
 
     run = load_run(run_dir)
     result = reconstruct(run, extinction_ratio=extinction_ratio, retardance_deg=retardance_deg)
-    save_outputs(result, out_dir, run_dir, extinction_ratio, retardance_deg)
+    save_outputs(result, out_dir, run_dir, extinction_ratio, retardance_deg, run)
 
     np.set_printoptions(precision=4, suppress=True)
     print(f"Mode: 4x4 continuous, frames used: {len(run.files)}")
     print(f"Fixed angles: {run.fixed_angles}")
+    if run.dark_subtracted:
+        print(f"Dark-current subtraction: applied ({run.dark_frame_count} frame(s), "
+              f"mean dark level {run.dark_level_mean:.4f})")
+    else:
+        print("Dark-current subtraction: NOT applied (no Dark/ folder found)")
     print(f"System matrix condition number: {result.condition_number:.3f}")
     print(f"Mean fit residual (RMS): {result.residual_rms.mean():.6f}")
     print("Mean Mueller matrix (normalized by m00):")

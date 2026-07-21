@@ -220,6 +220,14 @@ the root README). Writes the same file set as transmission's 4x4 tool:
 and its "Polar decomposition" section for what diattenuation/polarizance/
 depolarization index/estimated retardance mean and how they're computed.
 
+Also supports dark-current subtraction, identically to transmission mode —
+see `../../../own_code/DISCRETE/4x4/README.md`'s "Dark-current subtraction"
+section: capture 1+ frames with the camera blocked (source off, or all
+components removed/covered — either is fine), save them into
+`<run_directory>/Dark/`, and `image_loader.py` averages and subtracts them
+automatically. Optional — proceeds on raw intensities with a warning if
+`Dark/` is absent.
+
 ### Step 3 — `theoretical_mueller.py`
 
 Run `python theoretical_mueller.py`. You'll be prompted for a **sample

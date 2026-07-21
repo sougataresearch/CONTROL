@@ -71,7 +71,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from image_loader import load_run
+from image_loader import dark_reference_available, load_run
 from solve_mueller import reconstruct
 from theoretical_mueller import get_or_prompt_matrix
 
@@ -147,13 +147,24 @@ def _date_relative_path(path: Path) -> Path:
     return Path(path.name)
 
 
+def _format_matrix(m: np.ndarray) -> str:
+    return "\n".join("    [" + ", ".join(f"{v:+.4f}" for v in row) + "]" for row in m)
+
+
 @dataclass
 class _CachedResult:
     matrix: np.ndarray
     matrix_mean: np.ndarray
+    dark_subtracted: bool
 
 
 def _load_cached_reconstruction(sample_dir: Path, extinction_ratio: float, retardance_deg: float):
+    """Reuse main.py's saved reconstruction if it matches this run's current
+    calibration AND dark-current status -- a cache made before a dark
+    reference was captured (or before dark-frame lookup covered its
+    location) must not be silently reused once one becomes available, or
+    the comparison would look dark-corrected when it isn't."""
+
     cache_dir = (RESULT_ROOT / "reflection" / "4x4" / "reconstructions"
                  / _date_relative_path(sample_dir))
     calibration_path = cache_dir / "calibration_used.json"
@@ -169,12 +180,15 @@ def _load_cached_reconstruction(sample_dir: Path, extinction_ratio: float, retar
     if (cached_calibration.get("extinction_ratio") != extinction_ratio
             or cached_calibration.get("retardance_deg") != retardance_deg):
         return None
+    if cached_calibration.get("dark_subtracted") != dark_reference_available(sample_dir):
+        return None
 
     matrix = np.load(matrix_path)
     matrix_raw = np.load(raw_path)
     mean_raw = matrix_raw.mean(axis=(0, 1))
     matrix_mean = mean_raw / mean_raw[0, 0]
-    return _CachedResult(matrix=matrix, matrix_mean=matrix_mean)
+    return _CachedResult(matrix=matrix, matrix_mean=matrix_mean,
+                          dark_subtracted=cached_calibration["dark_subtracted"])
 
 
 def _git_commit_hash() -> str:
@@ -203,6 +217,7 @@ def main() -> None:
     base_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    matrix_blocks = []
     for sample_dir in SAMPLE_DIRECTORIES:
         sample_dir = Path(sample_dir)
         sample_label = sample_dir.name
@@ -211,14 +226,26 @@ def main() -> None:
 
         result = _load_cached_reconstruction(sample_dir, extinction_ratio, retardance_deg)
         if result is not None:
+            dark_subtracted = result.dark_subtracted
             print(f"{sample_label}: reusing main.py's cached reconstruction (matching calibration)")
         else:
             run = load_run(sample_dir)
             result = reconstruct(run, extinction_ratio=extinction_ratio, retardance_deg=retardance_deg)
+            dark_subtracted = run.dark_subtracted
+        print(f"{sample_label}: dark-current subtraction "
+              f"{'applied' if dark_subtracted else 'NOT applied'}")
 
         diff_mean = result.matrix_mean - theory
         frobenius_error = float(np.linalg.norm(diff_mean))
         mse = float(np.mean(diff_mean ** 2))
+        rmse = float(np.sqrt(mse))
+
+        matrix_blocks.append(
+            f"\n=== {sample_label} ===\n"
+            f"Theoretical Mueller matrix:\n{_format_matrix(theory)}\n"
+            f"Experimental Mueller matrix (mean):\n{_format_matrix(result.matrix_mean)}\n"
+            f"Deviation (RMS): {rmse:.6f}\n"
+        )
 
         diff_per_pixel = result.matrix - theory[None, None, :, :]
         per_pixel_frobenius = np.sqrt((diff_per_pixel ** 2).sum(axis=(2, 3)))
@@ -258,16 +285,19 @@ def main() -> None:
         plt.close(fig2)
 
         rows.append((sample_label, frobenius_error, mse,
-                     float(per_pixel_frobenius.mean()), float(per_pixel_mse.mean())))
+                     float(per_pixel_frobenius.mean()), float(per_pixel_mse.mean()),
+                     dark_subtracted))
         print(f"{sample_label}: Frobenius error (mean matrix) = {frobenius_error:.4f}, "
               f"MSE (mean matrix) = {mse:.6f}")
         print(f"{sample_label}: mean per-pixel Frobenius error = {per_pixel_frobenius.mean():.4f}, "
               f"mean per-pixel MSE = {per_pixel_mse.mean():.6f}")
 
     with open(base_dir / "summary.txt", "w", encoding="utf-8") as fh:
-        fh.write("sample                | Frobenius error | MSE      | mean px Frobenius | mean px MSE\n")
-        for name, frob, mse, px_frob, px_mse in rows:
-            fh.write(f"{name:22s} | {frob:15.4f} | {mse:.6f} | {px_frob:18.4f} | {px_mse:.6f}\n")
+        fh.write("sample                | Frobenius error | MSE      | mean px Frobenius | mean px MSE | dark subtracted\n")
+        for name, frob, mse, px_frob, px_mse, dark_subtracted in rows:
+            fh.write(f"{name:22s} | {frob:15.4f} | {mse:.6f} | {px_frob:18.4f} | {px_mse:.6f} | {dark_subtracted}\n")
+        fh.write("\n--- Per-sample Mueller matrices (mean-matrix comparison) ---\n")
+        fh.write("".join(matrix_blocks))
         fh.write("\n--- Provenance ---\n")
         fh.write(f"Generated: {datetime.now().isoformat(timespec='seconds')}\n")
         fh.write(f"Git commit: {_git_commit_hash()}\n")

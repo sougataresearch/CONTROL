@@ -1,16 +1,16 @@
-"""Phase 2: validate the continuous-rotation 4x4 solver against samples with
-a known theoretical Mueller matrix -- air (should reconstruct to identity),
-a linear polarizer at a known angle, and a QWP at a known angle -- using the
-exact same reconstruction as main.py.
+"""Phase 2: validate the 4x4 solver against samples with a known theoretical
+Mueller matrix -- air (should reconstruct to identity), a linear polarizer
+at a known angle, and a QWP at a known angle -- using the exact same
+reconstruction as main.py.
 
-Deliberate duplicate in spirit of ../../DISCRETE/4x4/validate_against_theory.py
-(and, one level further back, ../../DISCRETE/3x3/validate_against_theory.py):
-the theoretical matrices here are NOT hand-derived, they call this folder's
-own mueller_forward_model.py functions (mueller_linear_polarizer()/
-mueller_retarder()) directly -- the exact same physics the reconstruction
-itself is built from, so any mismatch you see reflects a real calibration
-issue (angle offset, extinction ratio, retardance), not a bug in a
-separately hand-derived "theory" formula.
+Deliberate duplicate in spirit of ../3x3/validate_against_theory.py, but the
+theoretical matrices here are NOT hand-derived: they call
+mueller_forward_model.py's own mueller_linear_polarizer()/mueller_retarder()
+directly. 4x4 matrices carry extra circular-polarization (S3-coupled) terms
+that are easy to get wrong by hand-typing a formula -- reusing the exact
+function the reconstruction itself is built from means any mismatch you see
+here reflects a real calibration issue (angle offset, extinction ratio,
+retardance), not a bug in a separately hand-derived "theory" formula.
 
 This is the calibration baseline: if air's error and the LP/QWP samples'
 error look similar (same pattern, similar magnitude), the discrepancy is a
@@ -18,7 +18,7 @@ systematic PSG/PSA modeling problem, not something sample-specific -- see
 NAMING.md and the own_code READMEs for the fuller discussion of what to do
 next in that case.
 
-To run: edit SAMPLE_DIRECTORIES below to list every continuous run you want
+To run: edit SAMPLE_DIRECTORIES below to list every dataset you want
 checked (folder name must be "air", "lp<angle>", or "qwp<angle>" so the
 theoretical target can be inferred -- extend theoretical_matrix() for other
 known references), then:
@@ -85,22 +85,21 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from image_loader import load_run
+from image_loader import dark_reference_available, load_run
 from mueller_forward_model import mueller_linear_polarizer, mueller_retarder
 from solve_mueller import reconstruct
 
 # ---------------------------------------------------------------------------
-# EDIT THIS: every continuous run to check against its known theoretical
-# matrix. Folder name drives theoretical_matrix() below -- "air",
-# "lp<angle>", or "qwp<angle>". Each folder must contain Images/,
-# Logs/experiment_log.csv, and Config/experiment_config.json (the output of
-# continous_rotation/01_main.py).
+# EDIT THIS: every dataset to check against its known theoretical matrix.
+# Folder name drives theoretical_matrix() below -- "air", "lp<angle>", or
+# "qwp<angle>". Each folder must be 4x4 mode (Config/experiment_config.json
+# with "fixed_angles" for PSG_Polarizer/PSA_Analyzer).
 # ---------------------------------------------------------------------------
 SAMPLE_DIRECTORIES = [
-    r"G:\control\Data\continuous\air",
-    r"G:\control\Data\continuous\lp30",
-    r"G:\control\Data\continuous\lp45",
-    r"G:\control\Data\continuous\qwp90",
+    r"C:\COMPARE_CASES\control\Data\03072026\qwp\air",
+    r"C:\COMPARE_CASES\control\Data\03072026\qwp\lp30",
+    r"C:\COMPARE_CASES\control\Data\03072026\qwp\lp45",
+    r"C:\COMPARE_CASES\control\Data\03072026\qwp\qwp90",
 ]
 # ---------------------------------------------------------------------------
 
@@ -183,10 +182,10 @@ def theoretical_matrix(sample_name: str) -> np.ndarray:
     """Infer the ideal 4x4 Mueller matrix from the sample's folder name --
     "air" -> identity, "lp<angle>" -> mueller_linear_polarizer() at that
     angle (ideal, extinction 0), "qwp<angle>" -> mueller_retarder() at that
-    angle (ideal, retardance 90). Calls this folder's own
-    mueller_forward_model.py functions rather than a separately hand-derived
-    formula -- see the module docstring for why that matters for 4x4
-    specifically. Add a case here for any other known reference sample."""
+    angle (ideal, retardance 90). Calls mueller_forward_model.py's own
+    functions rather than a separately hand-derived formula -- see the
+    module docstring for why that matters for 4x4 specifically. Add a case
+    here for any other known reference sample."""
 
     name = sample_name.lower()
     if name == "air":
@@ -208,6 +207,53 @@ def theoretical_matrix(sample_name: str) -> np.ndarray:
     )
 
 
+@dataclass
+class _CachedResult:
+    matrix: np.ndarray
+    matrix_mean: np.ndarray
+    dark_subtracted: bool
+
+
+def _load_cached_reconstruction(sample_dir: Path, extinction_ratio: float, retardance_deg: float):
+    """If main.py already reconstructed this exact sample with this exact
+    calibration AND dark-current status, reuse its saved output instead of
+    redoing the reconstruction from raw images -- solve_mueller.reconstruct()
+    is deterministic given the same images/extinction_ratio/retardance_deg, so
+    recomputing it here would just be duplicate work. Returns None (falls back
+    to a fresh reconstruction) if main.py hasn't been run for this sample, was
+    run with different calibration values, or its dark-subtraction status no
+    longer matches this run's current state (e.g. a dark reference was added
+    since) -- a stale/mismatched cache would silently corrupt the comparison,
+    so it's only reused on an exact match. Assumes main.py used its default
+    output location (Results/<date-relative-path> next to main.py); a custom
+    --out won't be found here."""
+
+    cache_dir = (RESULT_ROOT / "transmission" / "4x4" / "reconstructions"
+                 / _date_relative_path(sample_dir))
+    calibration_path = cache_dir / "calibration_used.json"
+    matrix_path = cache_dir / "mueller_matrix_normalized.npy"
+    raw_path = cache_dir / "mueller_matrix_raw.npy"
+    if not (calibration_path.exists() and matrix_path.exists() and raw_path.exists()):
+        return None
+
+    try:
+        cached_calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    if (cached_calibration.get("extinction_ratio") != extinction_ratio
+            or cached_calibration.get("retardance_deg") != retardance_deg):
+        return None
+    if cached_calibration.get("dark_subtracted") != dark_reference_available(sample_dir):
+        return None
+
+    matrix = np.load(matrix_path)
+    matrix_raw = np.load(raw_path)
+    mean_raw = matrix_raw.mean(axis=(0, 1))
+    matrix_mean = mean_raw / mean_raw[0, 0]
+    return _CachedResult(matrix=matrix, matrix_mean=matrix_mean,
+                          dark_subtracted=cached_calibration["dark_subtracted"])
+
+
 _DATE_DIR_RE = re.compile(r"^\d{8}$")
 
 
@@ -225,45 +271,8 @@ def _date_relative_path(path: Path) -> Path:
     return Path(path.name)
 
 
-@dataclass
-class _CachedResult:
-    matrix: np.ndarray
-    matrix_mean: np.ndarray
-
-
-def _load_cached_reconstruction(sample_dir: Path, extinction_ratio: float, retardance_deg: float):
-    """If main.py already reconstructed this exact sample with this exact
-    calibration, reuse its saved output instead of redoing the reconstruction
-    from raw frames -- solve_mueller.reconstruct() is deterministic given the
-    same frames/extinction_ratio/retardance_deg, so recomputing it here would
-    just be duplicate work. Returns None (falls back to a fresh reconstruction)
-    if main.py hasn't been run for this sample, or was run with different
-    calibration values -- a stale/mismatched cache would silently corrupt the
-    comparison, so it's only reused on an exact match. Assumes main.py used
-    its default output location (Results/<date-relative-path> next to
-    main.py); a custom --out won't be found here."""
-
-    cache_dir = (RESULT_ROOT / "transmission" / "continuous_4x4" / "reconstructions"
-                 / _date_relative_path(sample_dir))
-    calibration_path = cache_dir / "calibration_used.json"
-    matrix_path = cache_dir / "mueller_matrix_normalized.npy"
-    raw_path = cache_dir / "mueller_matrix_raw.npy"
-    if not (calibration_path.exists() and matrix_path.exists() and raw_path.exists()):
-        return None
-
-    try:
-        cached_calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-    if (cached_calibration.get("extinction_ratio") != extinction_ratio
-            or cached_calibration.get("retardance_deg") != retardance_deg):
-        return None
-
-    matrix = np.load(matrix_path)
-    matrix_raw = np.load(raw_path)
-    mean_raw = matrix_raw.mean(axis=(0, 1))
-    matrix_mean = mean_raw / mean_raw[0, 0]
-    return _CachedResult(matrix=matrix, matrix_mean=matrix_mean)
+def _format_matrix(m: np.ndarray) -> str:
+    return "\n".join("    [" + ", ".join(f"{v:+.4f}" for v in row) + "]" for row in m)
 
 
 def _git_commit_hash() -> str:
@@ -294,10 +303,11 @@ def main() -> None:
     _save_last_calibration({"extinction_ratio": extinction_ratio, "retardance_deg": retardance_deg})
     _append_calibration_log(extinction_ratio, retardance_deg)
 
-    base_dir = RESULT_ROOT / "transmission" / "continuous_4x4" / "validation_against_theory"
+    base_dir = RESULT_ROOT / "transmission" / "4x4" / "validation_against_theory"
     base_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    matrix_blocks = []
     for sample_dir in SAMPLE_DIRECTORIES:
         sample_dir = Path(sample_dir)
         sample_name = sample_dir.name
@@ -305,12 +315,25 @@ def main() -> None:
 
         result = _load_cached_reconstruction(sample_dir, extinction_ratio, retardance_deg)
         if result is not None:
+            dark_subtracted = result.dark_subtracted
             print(f"{sample_name}: reusing main.py's cached reconstruction (matching calibration)")
         else:
             run = load_run(sample_dir)
             result = reconstruct(run, extinction_ratio=extinction_ratio, retardance_deg=retardance_deg)
+            dark_subtracted = run.dark_subtracted
+        print(f"{sample_name}: dark-current subtraction "
+              f"{'applied' if dark_subtracted else 'NOT applied'}")
 
         mean_matrix_error = float(np.linalg.norm(result.matrix_mean - theory))
+        rmse = float(np.sqrt(np.mean((result.matrix_mean - theory) ** 2)))
+
+        matrix_blocks.append(
+            f"\n=== {sample_name} ===\n"
+            f"Theoretical Mueller matrix:\n{_format_matrix(theory)}\n"
+            f"Experimental Mueller matrix (mean):\n{_format_matrix(result.matrix_mean)}\n"
+            f"Deviation (RMS): {rmse:.6f}\n"
+        )
+
         diff = result.matrix - theory[None, None, :, :]
         per_pixel_error = np.sqrt((diff ** 2).sum(axis=(2, 3)))
 
@@ -342,14 +365,16 @@ def main() -> None:
         fig2.savefig(out_dir / "error_map.png", dpi=200)
         plt.close(fig2)
 
-        rows.append((sample_name, mean_matrix_error, float(per_pixel_error.mean())))
+        rows.append((sample_name, mean_matrix_error, float(per_pixel_error.mean()), dark_subtracted))
         print(f"{sample_name}: mean-matrix Frobenius error = {mean_matrix_error:.4f}, "
               f"mean per-pixel Frobenius error = {per_pixel_error.mean():.4f}")
 
     with open(base_dir / "summary.txt", "w", encoding="utf-8") as fh:
-        fh.write("sample      | mean-matrix Frobenius error | mean per-pixel Frobenius error\n")
-        for name, mean_err, pix_err in rows:
-            fh.write(f"{name:11s} | {mean_err:27.4f} | {pix_err:.4f}\n")
+        fh.write("sample      | mean-matrix Frobenius error | mean per-pixel Frobenius error | dark subtracted\n")
+        for name, mean_err, pix_err, dark_subtracted in rows:
+            fh.write(f"{name:11s} | {mean_err:27.4f} | {pix_err:.4f} | {dark_subtracted}\n")
+        fh.write("\n--- Per-sample Mueller matrices (mean-matrix comparison) ---\n")
+        fh.write("".join(matrix_blocks))
         fh.write("\n--- Provenance ---\n")
         fh.write(f"Generated: {datetime.now().isoformat(timespec='seconds')}\n")
         fh.write(f"Git commit: {_git_commit_hash()}\n")
@@ -361,7 +386,7 @@ def main() -> None:
     print()
     if air_row is not None and air_row[1] > 0:
         print("Comparing each sample's error against air's baseline error:")
-        for name, mean_err, _ in rows:
+        for name, mean_err, _, _ in rows:
             if name.lower() != "air":
                 print(f"  {name}: {mean_err:.4f}  ({mean_err / air_row[1]:.1f}x air's {air_row[1]:.4f})")
         print(

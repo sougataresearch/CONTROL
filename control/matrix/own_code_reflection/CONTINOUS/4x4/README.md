@@ -94,6 +94,14 @@ the root README). Writes the same files as
 maps, `summary.txt`, `mueller_matrix_overview.png`, `residual_rms.png`,
 `polar_decomposition.png`.
 
+Also supports dark-current subtraction, identically to transmission mode —
+see `../../../own_code/DISCRETE/4x4/README.md`'s "Dark-current subtraction"
+section: capture 1+ frames with the camera blocked (source off, or all
+components removed/covered — either is fine), save them into
+`<run_directory>/Dark/`, and `image_loader.py` averages and subtracts them
+automatically. Optional — proceeds on raw intensities with a warning if
+`Dark/` is absent.
+
 ### Step 2 — `theoretical_mueller.py`
 
 Identical prompts/behavior to `../../DISCRETE/4x4/README.md`'s "Step 3"

@@ -110,6 +110,14 @@ README). Writes the same files as transmission's 3x3 tool:
 `mueller_matrix_overview.png`, `residual_rms.png` — see
 `../../../own_code/DISCRETE/3x3/README.md`'s table for what each contains.
 
+Also supports dark-current subtraction, identically to transmission mode —
+see `../../../own_code/DISCRETE/3x3/README.md`'s "Dark-current subtraction"
+section: capture 1+ frames with the camera blocked (source off, or all
+components removed/covered — either is fine), save them into
+`<run_directory>/Dark/`, and `image_loader.py` averages and subtracts them
+automatically. Optional — proceeds on raw intensities with a warning if
+`Dark/` is absent.
+
 ### Step 3 — `theoretical_mueller.py`
 
 Run `python theoretical_mueller.py`. You'll be prompted for a **sample

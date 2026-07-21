@@ -341,7 +341,7 @@ def main() -> None:
     # Mirror the run's date/sample path from under DATA_ROOT (e.g.
     # "03072026/qwp/qwp90") so results from the same sample name captured on
     # different dates don't collide or overwrite each other.
-    out_dir = (Path(__file__).resolve().parent / "Results"
+    out_dir = (Path(r"C:\COMPARE_CASES\RESULT") / "angle_subset_comparison" / "4x4"
                / Path(SAMPLE_DIRECTORY).relative_to(Path(DATA_ROOT)))
     out_dir.mkdir(parents=True, exist_ok=True)
 

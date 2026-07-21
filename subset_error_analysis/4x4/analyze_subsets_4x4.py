@@ -16,8 +16,9 @@ rotation, which has no fixed angle grid to draw discrete subsets from.
 This folder is fully self-contained: its own copy of the fixed-polarizer +
 rotating-QWP rotation-sandwich physics, image loader, and theoretical-matrix
 formulas (matching control/matrix/own_code/DISCRETE/4x4/). It does not
-import anything from control/ or angle_subset_comparison/, and never writes
-outside its own Results/ directory -- data under Data/ is only ever read.
+import anything from control/ or angle_subset_comparison/. Results are
+written under the shared RESULT/subset_error_analysis/4x4/ tree (see
+RESULTS_DIR below) -- data under Data/ is only ever read.
 
 Usage:
     python analyze_subsets_4x4.py
@@ -92,7 +93,7 @@ MIN_UNIQUE_ANGLES = SUBSET_SIZE + 1
 EXTINCTION_RATIO = 0.0
 RETARDANCE_DEG = 90.0
 
-RESULTS_DIR = Path(__file__).resolve().parent / "Results"
+RESULTS_DIR = Path(r"C:\COMPARE_CASES\RESULT") / "subset_error_analysis" / "4x4"
 # ---------------------------------------------------------------------------
 
 
